@@ -1,0 +1,45 @@
+name: Publish PyTorch Code Server 26.04
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - images/pytorch-code-server-26.04/**
+      - .github/workflows/publish-pytorch-code-server-26.04.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/davhov/pytorch-code-server
+  IMAGE_TAG: 26.04-py3
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: images/pytorch-code-server-26.04
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+            ${{ env.IMAGE_NAME }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.description=PyTorch code-server image for the new Aetna cluster

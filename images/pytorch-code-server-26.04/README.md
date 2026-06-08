@@ -15,6 +15,12 @@ Adds:
 - `sudo` for the existing `ubuntu` user
 - default workspace at `/home/jovyan`
 
+Published image:
+
+```text
+ghcr.io/davhov/pytorch-code-server:26.04-py3
+```
+
 Local image built and tested as:
 
 ```text
@@ -39,5 +45,4 @@ Save as tar:
 docker save -o pytorch-code-server_26.04-py3.tar local/pytorch-code-server:26.04-py3
 ```
 
-For GitHub, keep this build recipe in Git. Push the actual image to a container registry such as GHCR.
-
+The GitHub Actions workflow `.github/workflows/publish-pytorch-code-server-26.04.yml` builds this directory and pushes the image to GHCR.
