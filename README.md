@@ -31,7 +31,7 @@ Main files:
 
 The portal creates namespaces, namespace-scoped user rights, PVCs, Deployments, Services, and direct `us....-4` ingress links. It also supports named deployments per user and offboarding through the `Del` button.
 
-The portal also creates a Rancher local user named `USER_ID` with initial password `qweasd123` and `mustChangePassword: true`. Code-server itself remains open/no-login.
+The portal also creates a Rancher local user named `USER_ID`, plus the matching `cattle-local-user-passwords/USER_ID` password Secret for the initial Rancher UI password `qweasd123`. `mustChangePassword: true` is set on the Rancher User. Code-server itself remains open/no-login.
 
 ## GPU Usage Dashboard
 

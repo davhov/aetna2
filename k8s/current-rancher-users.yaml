@@ -8,7 +8,6 @@ metadata:
 displayName: Christian Muller
 description: Aetna onboarded user chmu01
 username: chmu01
-password: qweasd123
 enabled: true
 mustChangePassword: true
 ---
@@ -22,6 +21,5 @@ metadata:
 displayName: Igor Vozniak
 description: Aetna onboarded user igvo01
 username: igvo01
-password: qweasd123
 enabled: true
 mustChangePassword: true

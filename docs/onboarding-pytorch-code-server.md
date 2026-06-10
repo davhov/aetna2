@@ -61,7 +61,7 @@ https://usg-demo-4.sb.dfki.de:32004/daho03-code-server/
 The baseline creates:
 
 - Namespace `USER_ID`
-- Rancher local User `USER_ID`, with initial password `qweasd123` and `mustChangePassword: true`
+- Rancher local User `USER_ID`, with the initial Rancher UI password stored in `cattle-local-user-passwords/USER_ID` and `mustChangePassword: true`
 - ServiceAccount `USER_ID`
 - RoleBinding `USER_ID-edit`, bound to the built-in namespace-scoped `edit` ClusterRole
 - PVC `USER_ID-geneva-local-storage`, `500Gi`, StorageClass `asr-geneva-local-path`
@@ -77,7 +77,7 @@ Important defaults:
 - No `runtimeClassName`
 - Ingress is intentionally open, with no login prompt
 - `/dev/shm` is memory-backed and limited to `16Gi`
-- Rancher UI login password: initial password `qweasd123`; Rancher forces the user to change it after first login.
+- Rancher UI login password: initial password `qweasd123`; Rancher forces the user to change it after first login. The password is not stored on the `User` CRD directly; it is seeded through the Rancher local-user password Secret.
 
 The ServiceAccount and RoleBinding provide normal namespace-level Kubernetes rights. They do not grant cluster-admin permissions.
 
@@ -110,7 +110,7 @@ It provides a DFKI-branded page with:
 - a `Del` button for offboarding a user namespace and all deployments in it
 
 The portal creates the same Namespace, PVC, Deployment, Service, and Ingress pattern as the scripts.
-It also creates the matching Rancher local User `USER_ID` with initial password `qweasd123` and `mustChangePassword: true`.
+It also creates the matching Rancher local User `USER_ID`, seeds the default Rancher UI password through `cattle-local-user-passwords/USER_ID`, and sets `mustChangePassword: true`.
 
 User IDs are generated from the first two characters of the first name plus the first two characters of the surname plus a numeric suffix. For example, `Igor Vozniak` becomes `igvo01` if that namespace is free.
 
@@ -126,7 +126,7 @@ Deployment naming:
   - Ingress URL: `https://usg-demo-4.sb.dfki.de:32004/USER_ID-DEPLOYMENT-code-server/`
 
 Offboarding from the portal deletes the whole user namespace. That removes the ServiceAccount, RoleBinding, PVCs, Deployments, Services, and Ingresses for that user. Kubernetes namespace deletion is asynchronous, so the namespace may remain visible in `kubectl` briefly while it is terminating.
-Offboarding also deletes the matching Rancher local User `USER_ID`.
+Offboarding also deletes the matching Rancher local User `USER_ID` and its local-user password Secret.
 
 Operational note:
 

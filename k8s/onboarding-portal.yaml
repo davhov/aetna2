@@ -36,6 +36,9 @@ rules:
   - apiGroups: ["management.cattle.io"]
     resources: ["users"]
     verbs: ["get", "list", "create", "delete", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "create", "delete", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -73,6 +76,8 @@ data:
     HOST_NAME = "usg-demo-4.sb.dfki.de"
     EXTERNAL_PORT = "32004"
     IMAGE = "ghcr.io/davhov/pytorch-code-server:26.04-py3"
+    PASSWORD_SECRET_NAMESPACE = "cattle-local-user-passwords"
+    DEFAULT_RANCHER_PASSWORD_BCRYPT_DATA = "JDJiJDEyJDRHbFNKZkZQckxmY3YuUEltZkFMR2U0SzFyWjRJVHlIMS4wV0J0cmszUC9QL0VXT2JVNFRl"
 
     TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
     CA_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
@@ -119,6 +124,10 @@ data:
         if " failed with 404:" in str(exc):
           return False
         raise
+
+    def delete_if_exists(path):
+      if exists(path):
+        api_request("DELETE", path)
 
     def normalize_part(value, field):
       value = re.sub(r"[^a-z0-9]", "", value.strip().lower())
@@ -371,25 +380,56 @@ data:
 
     def ensure_rancher_user(user_id, first_name, last_name):
       if exists(f"/apis/management.cattle.io/v3/users/{user_id}"):
-        return
-      rancher_user = {
-        "apiVersion": "management.cattle.io/v3",
-        "kind": "User",
-        "metadata": {
-          "name": user_id,
-          "labels": {
-            "aetna.dfki.de/onboarded-user": "true",
-            "aetna.dfki.de/user-id": user_id,
+        rancher_user = api_request("GET", f"/apis/management.cattle.io/v3/users/{user_id}")
+      else:
+        rancher_user = {
+          "apiVersion": "management.cattle.io/v3",
+          "kind": "User",
+          "metadata": {
+            "name": user_id,
+            "labels": {
+              "aetna.dfki.de/onboarded-user": "true",
+              "aetna.dfki.de/user-id": user_id,
+            },
           },
+          "displayName": f"{first_name} {last_name}".strip(),
+          "description": f"Aetna onboarded user {user_id}",
+          "username": user_id,
+          "enabled": True,
+          "mustChangePassword": True,
+        }
+        rancher_user = api_request("POST", "/apis/management.cattle.io/v3/users", rancher_user)
+      ensure_rancher_password_secret(user_id, rancher_user)
+
+    def ensure_rancher_password_secret(user_id, rancher_user):
+      path = f"/api/v1/namespaces/{PASSWORD_SECRET_NAMESPACE}/secrets/{user_id}"
+      if exists(path):
+        return
+      user_uid = rancher_user.get("metadata", {}).get("uid")
+      metadata = {
+        "name": user_id,
+        "namespace": PASSWORD_SECRET_NAMESPACE,
+        "labels": {
+          "aetna.dfki.de/onboarded-user": "true",
+          "aetna.dfki.de/user-id": user_id,
         },
-        "displayName": f"{first_name} {last_name}".strip(),
-        "description": f"Aetna onboarded user {user_id}",
-        "username": user_id,
-        "password": "qweasd123",
-        "enabled": True,
-        "mustChangePassword": True,
+        "annotations": {"cattle.io/password-hash": "bcrypt"},
       }
-      api_request("POST", "/apis/management.cattle.io/v3/users", rancher_user)
+      if user_uid:
+        metadata["ownerReferences"] = [{
+          "apiVersion": "management.cattle.io/v3",
+          "kind": "User",
+          "name": user_id,
+          "uid": user_uid,
+        }]
+      secret = {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": metadata,
+        "type": "Opaque",
+        "data": {"password": DEFAULT_RANCHER_PASSWORD_BCRYPT_DATA},
+      }
+      api_request("POST", f"/api/v1/namespaces/{PASSWORD_SECRET_NAMESPACE}/secrets", secret)
 
     def delete_user(user_id):
       if not re.match(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", user_id):
@@ -399,6 +439,7 @@ data:
       api_request("DELETE", f"/api/v1/namespaces/{user_id}")
       if exists(f"/apis/management.cattle.io/v3/users/{user_id}"):
         api_request("DELETE", f"/apis/management.cattle.io/v3/users/{user_id}")
+      delete_if_exists(f"/api/v1/namespaces/{PASSWORD_SECRET_NAMESPACE}/secrets/{user_id}")
       return user_id
 
     def list_users():

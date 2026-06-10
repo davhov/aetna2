@@ -168,9 +168,22 @@ metadata:
 displayName: "${FIRST_NAME} ${LAST_NAME}"
 description: Aetna onboarded user ${USER_ID}
 username: ${USER_ID}
-password: qweasd123
 enabled: true
 mustChangePassword: true
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ${USER_ID}
+  namespace: cattle-local-user-passwords
+  annotations:
+    cattle.io/password-hash: bcrypt
+  labels:
+    aetna.dfki.de/onboarded-user: "true"
+    aetna.dfki.de/user-id: ${USER_ID}
+type: Opaque
+data:
+  password: JDJiJDEyJDRHbFNKZkZQckxmY3YuUEltZkFMR2U0SzFyWjRJVHlIMS4wV0J0cmszUC9QL0VXT2JVNFRl
 ---
 apiVersion: v1
 kind: ServiceAccount
