@@ -19,6 +19,42 @@ userPrincipalName: local://chmu01
 apiVersion: management.cattle.io/v3
 kind: ClusterRoleTemplateBinding
 metadata:
+  name: kopo01-local-cluster-member
+  namespace: local
+clusterName: local
+roleTemplateName: cluster-member
+userName: kopo01
+userPrincipalName: local://kopo01
+---
+apiVersion: management.cattle.io/v3
+kind: GlobalRoleBinding
+metadata:
+  name: kopo01-standard-user
+globalRoleName: user
+userName: kopo01
+userPrincipalName: local://kopo01
+---
+apiVersion: management.cattle.io/v3
+kind: ClusterRoleTemplateBinding
+metadata:
+  name: timk01-local-cluster-member
+  namespace: local
+clusterName: local
+roleTemplateName: cluster-member
+userName: timk01
+userPrincipalName: local://timk01
+---
+apiVersion: management.cattle.io/v3
+kind: GlobalRoleBinding
+metadata:
+  name: timk01-standard-user
+globalRoleName: user
+userName: timk01
+userPrincipalName: local://timk01
+---
+apiVersion: management.cattle.io/v3
+kind: ClusterRoleTemplateBinding
+metadata:
   name: igvo01-local-cluster-member
   namespace: local
 clusterName: local

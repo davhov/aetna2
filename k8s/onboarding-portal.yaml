@@ -37,7 +37,7 @@ rules:
     resources: ["users"]
     verbs: ["get", "list", "create", "delete", "update", "patch"]
   - apiGroups: ["management.cattle.io"]
-    resources: ["clusterroletemplatebindings"]
+    resources: ["globalrolebindings", "clusterroletemplatebindings"]
     verbs: ["get", "list", "create", "delete", "update", "patch"]
   - apiGroups: ["ui.cattle.io"]
     resources: ["navlinks"]
@@ -92,6 +92,47 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: onboarding-portal-manager
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: onboarding-portal-can-grant-rancher-user
+subjects:
+  - kind: ServiceAccount
+    name: onboarding-portal
+    namespace: onboarding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cattle-globalrole-user
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: onboarding-portal-can-grant-rancher-user
+  namespace: cattle-global-data
+subjects:
+  - kind: ServiceAccount
+    name: onboarding-portal
+    namespace: onboarding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: user-cattle-global-data
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: onboarding-portal-can-grant-rancher-user
+  namespace: fleet-default
+subjects:
+  - kind: ServiceAccount
+    name: onboarding-portal
+    namespace: onboarding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: user-fleet-default
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -167,8 +208,11 @@ data:
         raise
 
     def delete_if_exists(path):
-      if exists(path):
+      try:
         api_request("DELETE", path)
+      except RuntimeError as exc:
+        if " failed with 404:" not in str(exc):
+          raise
 
     def normalize_part(value, field):
       value = re.sub(r"[^a-z0-9]", "", value.strip().lower())
@@ -446,8 +490,24 @@ data:
           "mustChangePassword": True,
         }
         rancher_user = api_request("POST", "/apis/management.cattle.io/v3/users", rancher_user)
+      ensure_rancher_standard_user(user_id)
       ensure_rancher_cluster_member(user_id)
       ensure_rancher_password_secret(user_id, rancher_user)
+
+    def ensure_rancher_standard_user(user_id):
+      name = f"{user_id}-standard-user"
+      path = f"/apis/management.cattle.io/v3/globalrolebindings/{name}"
+      if exists(path):
+        return
+      binding = {
+        "apiVersion": "management.cattle.io/v3",
+        "kind": "GlobalRoleBinding",
+        "metadata": {"name": name},
+        "globalRoleName": "user",
+        "userName": user_id,
+        "userPrincipalName": f"local://{user_id}",
+      }
+      api_request("POST", "/apis/management.cattle.io/v3/globalrolebindings", binding)
 
     def ensure_rancher_cluster_member(user_id):
       name = f"{user_id}-local-cluster-member"
@@ -503,6 +563,7 @@ data:
       api_request("DELETE", f"/api/v1/namespaces/{user_id}")
       if exists(f"/apis/management.cattle.io/v3/users/{user_id}"):
         api_request("DELETE", f"/apis/management.cattle.io/v3/users/{user_id}")
+      delete_if_exists(f"/apis/management.cattle.io/v3/globalrolebindings/{user_id}-standard-user")
       delete_if_exists(f"/apis/management.cattle.io/v3/namespaces/local/clusterroletemplatebindings/{user_id}-local-cluster-member")
       delete_if_exists(f"/api/v1/namespaces/{PASSWORD_SECRET_NAMESPACE}/secrets/{user_id}")
       return user_id
