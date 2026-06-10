@@ -94,10 +94,10 @@ The script refuses to run unless the kubeconfig points to the new Rancher-proxie
 
 ## Web Onboarding Portal
 
-The in-cluster onboarding portal is deployed on the new cluster at:
+The in-cluster onboarding portal is deployed on the new cluster in namespace `onboarding`. It is not exposed through a public `/onboarding/` Ingress. Log in as `daho03`, open the Rancher sidebar entry `Code Server Links`, then use the admin-only `OnBoarding` button.
 
 ```text
-https://usg-demo-4.sb.dfki.de:32004/onboarding/
+https://usg-demo-4.sb.dfki.de:32004/k8s/clusters/local/api/v1/namespaces/onboarding/services/http:onboarding-portal:80/proxy/
 ```
 
 It provides a DFKI-branded page with:
@@ -133,7 +133,8 @@ Offboarding also deletes the matching Rancher local User `USER_ID`, its determin
 Operational note:
 
 - The portal ServiceAccount is granted a narrow `bind` permission on the built-in `edit` ClusterRole so it can create each user's namespace-scoped `USER_ID-edit` RoleBinding.
-- The portal form posts to `/onboarding/`; using `/` breaks behind the ingress rewrite and must not be changed back.
+- The portal is served through the Rancher service proxy. Form actions post back to the current page so create/delete actions work behind the proxy.
+- The old public `/onboarding/` Ingress is intentionally absent.
 - Future server/storage placement is controlled from `STORAGE_TYPES` in `k8s/onboarding-portal.yaml`. Add another entry there with a label, StorageClass, and node name when another worker/storage target is ready.
 
 ## GPU Usage Dashboard
@@ -187,4 +188,4 @@ The visible row label is:
 USER_ID - DEPLOYMENT
 ```
 
-The dashboard filters in the browser with the logged-in Rancher session. Admin users such as `daho03` see links from all namespaces; onboarded users see only rows where the namespace or `aetna.dfki.de/user-id` label matches their Rancher username. The controller also removes old per-service `NavLink` objects labeled `aetna.dfki.de/code-server-navlink=true`, because Rancher `NavLink` objects are cluster-scoped and do not provide per-user visibility.
+The dashboard filters in the browser with the logged-in Rancher session. Admin users such as `daho03` see links from all namespaces and an `OnBoarding` button for the onboarding portal; onboarded users see only rows where the namespace or `aetna.dfki.de/user-id` label matches their Rancher username. The controller also removes old per-service `NavLink` objects labeled `aetna.dfki.de/code-server-navlink=true`, because Rancher `NavLink` objects are cluster-scoped and do not provide per-user visibility.

@@ -122,6 +122,8 @@ data:
         a { color: #0b4ea2; font-weight: 700; }
         .status { padding: 10px 12px; background: #eef4ff; border: 1px solid #c7d7fe; border-radius: 6px; margin-bottom: 14px; }
         .error { padding: 10px 12px; background: #fff0f0; border: 1px solid #f3b8b8; color: #9d1c1c; border-radius: 6px; margin-bottom: 14px; }
+        .admin-actions { display: none; margin-bottom: 14px; }
+        .admin-actions a { display: inline-flex; align-items: center; min-height: 36px; padding: 0 14px; border-radius: 6px; background: #0b4ea2; color: #fff; text-decoration: none; }
       </style>
     </head>
     <body>
@@ -133,6 +135,9 @@ data:
         </div>
       </header>
       <main>
+        <div id="adminActions" class="admin-actions">
+          <a href="/k8s/clusters/local/api/v1/namespaces/onboarding/services/http:onboarding-portal:80/proxy/" target="_blank">OnBoarding</a>
+        </div>
         <div id="message" class="status">Loading links...</div>
         <section class="panel">
           <div class="toolbar">
@@ -212,6 +217,9 @@ data:
             const userInfo = await currentUser();
             const userId = userIdFrom(userInfo);
             const admin = isAdmin(userInfo);
+            if (admin) {
+              document.getElementById("adminActions").style.display = "block";
+            }
             const selector = encodeURIComponent(USER_LABEL);
             if (!admin && !userId) {
               throw new Error("Could not determine the current Rancher user.");

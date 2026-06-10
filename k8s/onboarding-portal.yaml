@@ -134,6 +134,34 @@ roleRef:
   kind: Role
   name: user-fleet-default
 ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: onboarding-portal-ui-view
+  namespace: onboarding
+rules:
+  - apiGroups: [""]
+    resources: ["services/proxy"]
+    resourceNames:
+      - http:onboarding-portal:80
+      - https:onboarding-portal:80
+      - onboarding-portal:80
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: onboarding-portal-ui-view-daho03
+  namespace: onboarding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: onboarding-portal-ui-view
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: daho03
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -614,7 +642,7 @@ data:
         f"<tr><td>{html.escape(u['user_id'])}</td><td>{html.escape(u['first_name'])} {html.escape(u['last_name'])}</td>"
         f"<td>{html.escape(u['deployment'])}</td><td>{html.escape(u['storage_type'])}</td><td>{html.escape(u['storage_size'])}</td>"
         f"<td><a href='{html.escape(u['url'])}' target='_blank'>Open</a></td>"
-        f"<td><form method='post' action='/onboarding/' class='inline-form' onsubmit=\"return confirm('Delete namespace {html.escape(u['user_id'])} and all its deployments?');\">"
+        f"<td><form method='post' action='' class='inline-form' onsubmit=\"return confirm('Delete namespace {html.escape(u['user_id'])} and all its deployments?');\">"
         f"<input type='hidden' name='action' value='delete_user'><input type='hidden' name='user_id' value='{html.escape(u['user_id'])}'>"
         f"<button class='icon-button' title='Delete user' aria-label='Delete user'>Del</button></form></td></tr>"
         for u in users
@@ -676,7 +704,7 @@ data:
         {problem}
         <section>
           <h2>Create User</h2>
-          <form method="post" action="/onboarding/">
+          <form method="post" action="">
             <input type="hidden" name="action" value="create_user">
             <label>First name<input name="first_name" autocomplete="given-name" required></label>
             <label>Surname<input name="last_name" autocomplete="family-name" required></label>
@@ -797,27 +825,3 @@ spec:
       port: 80
       targetPort: http
       protocol: TCP
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: onboarding-portal
-  namespace: onboarding
-  annotations:
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
-    nginx.ingress.kubernetes.io/rewrite-target: /$2
-    nginx.ingress.kubernetes.io/use-regex: "true"
-spec:
-  ingressClassName: nginx
-  rules:
-    - host: usg-demo-4.sb.dfki.de
-      http:
-        paths:
-          - path: /onboarding(/|$)(.*)
-            pathType: ImplementationSpecific
-            backend:
-              service:
-                name: onboarding-portal
-                port:
-                  number: 80
