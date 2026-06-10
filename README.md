@@ -22,7 +22,7 @@ The onboarding project creates open, no-login PyTorch code-server workspaces on 
 
 Main files:
 
-- `k8s/onboarding-portal.yaml`: in-cluster DFKI-branded web portal exposed at `https://usg-demo-4.sb.dfki.de:32004/onboarding/`.
+- `k8s/onboarding-portal.yaml`: in-cluster DFKI-branded web portal exposed at `https://us..-4.sb....de:32004/onboarding/`.
 - `k8s/baseline-user-pytorch-code-server.yaml`: copy/paste baseline for one user workspace.
 - `scripts/onboard-pytorch-code-server-user.ps1`: Windows onboarding script.
 - `scripts/onboard-pytorch-code-server-user.sh`: Ubuntu/bash onboarding script.
@@ -30,10 +30,4 @@ Main files:
 
 The portal creates namespaces, namespace-scoped user rights, PVCs, Deployments, Services, and direct `usg-demo-4` ingress links. It also supports named deployments per user and offboarding through the `Del` button.
 
-Use the new-cluster kubeconfig only:
 
-```text
-local.yaml
-```
-
-Do not use the old production kubeconfig for this onboarding flow.
