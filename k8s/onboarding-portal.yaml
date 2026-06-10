@@ -36,6 +36,9 @@ rules:
   - apiGroups: ["management.cattle.io"]
     resources: ["users"]
     verbs: ["get", "list", "create", "delete", "update", "patch"]
+  - apiGroups: ["management.cattle.io"]
+    resources: ["globalrolebindings", "clusterroletemplatebindings"]
+    verbs: ["get", "list", "create", "delete", "update", "patch"]
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "list", "create", "delete", "update", "patch"]
@@ -399,7 +402,40 @@ data:
           "mustChangePassword": True,
         }
         rancher_user = api_request("POST", "/apis/management.cattle.io/v3/users", rancher_user)
+      ensure_rancher_standard_user(user_id)
+      ensure_rancher_cluster_member(user_id)
       ensure_rancher_password_secret(user_id, rancher_user)
+
+    def ensure_rancher_standard_user(user_id):
+      name = f"{user_id}-standard-user"
+      path = f"/apis/management.cattle.io/v3/globalrolebindings/{name}"
+      if exists(path):
+        return
+      binding = {
+        "apiVersion": "management.cattle.io/v3",
+        "kind": "GlobalRoleBinding",
+        "metadata": {"name": name},
+        "globalRoleName": "user",
+        "userName": user_id,
+        "userPrincipalName": f"local://{user_id}",
+      }
+      api_request("POST", "/apis/management.cattle.io/v3/globalrolebindings", binding)
+
+    def ensure_rancher_cluster_member(user_id):
+      name = f"{user_id}-local-cluster-member"
+      path = f"/apis/management.cattle.io/v3/namespaces/local/clusterroletemplatebindings/{name}"
+      if exists(path):
+        return
+      binding = {
+        "apiVersion": "management.cattle.io/v3",
+        "kind": "ClusterRoleTemplateBinding",
+        "metadata": {"name": name, "namespace": "local"},
+        "clusterName": "local",
+        "roleTemplateName": "cluster-member",
+        "userName": user_id,
+        "userPrincipalName": f"local://{user_id}",
+      }
+      api_request("POST", "/apis/management.cattle.io/v3/namespaces/local/clusterroletemplatebindings", binding)
 
     def ensure_rancher_password_secret(user_id, rancher_user):
       path = f"/api/v1/namespaces/{PASSWORD_SECRET_NAMESPACE}/secrets/{user_id}"
@@ -439,6 +475,8 @@ data:
       api_request("DELETE", f"/api/v1/namespaces/{user_id}")
       if exists(f"/apis/management.cattle.io/v3/users/{user_id}"):
         api_request("DELETE", f"/apis/management.cattle.io/v3/users/{user_id}")
+      delete_if_exists(f"/apis/management.cattle.io/v3/globalrolebindings/{user_id}-standard-user")
+      delete_if_exists(f"/apis/management.cattle.io/v3/namespaces/local/clusterroletemplatebindings/{user_id}-local-cluster-member")
       delete_if_exists(f"/api/v1/namespaces/{PASSWORD_SECRET_NAMESPACE}/secrets/{user_id}")
       return user_id
 

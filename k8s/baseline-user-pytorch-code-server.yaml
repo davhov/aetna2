@@ -33,6 +33,24 @@ username: USER_ID
 enabled: true
 mustChangePassword: true
 ---
+apiVersion: management.cattle.io/v3
+kind: GlobalRoleBinding
+metadata:
+  name: USER_ID-standard-user
+globalRoleName: user
+userName: USER_ID
+userPrincipalName: local://USER_ID
+---
+apiVersion: management.cattle.io/v3
+kind: ClusterRoleTemplateBinding
+metadata:
+  name: USER_ID-local-cluster-member
+  namespace: local
+clusterName: local
+roleTemplateName: cluster-member
+userName: USER_ID
+userPrincipalName: local://USER_ID
+---
 apiVersion: v1
 kind: Secret
 metadata:
