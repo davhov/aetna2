@@ -1,0 +1,620 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: onboarding
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: onboarding-portal
+  namespace: onboarding
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: onboarding-portal-manager
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "create", "delete", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts", "services", "persistentvolumeclaims"]
+    verbs: ["get", "list", "create", "delete", "update", "patch"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["rolebindings"]
+    verbs: ["get", "list", "create", "delete", "update", "patch"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles"]
+    resourceNames: ["edit"]
+    verbs: ["bind"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "create", "delete", "update", "patch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "create", "delete", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: onboarding-portal-manager
+subjects:
+  - kind: ServiceAccount
+    name: onboarding-portal
+    namespace: onboarding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: onboarding-portal-manager
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: onboarding-portal-app
+  namespace: onboarding
+data:
+  app.py: |
+    import html
+    import json
+    import os
+    import re
+    import ssl
+    import urllib.error
+    import urllib.request
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import parse_qs
+
+    API = os.environ.get("KUBERNETES_SERVICE_HOST", "kubernetes.default.svc")
+    PORT = os.environ.get("KUBERNETES_SERVICE_PORT_HTTPS", "443")
+    API_BASE = f"https://{API}:{PORT}"
+    HOST_NAME = "usg-demo-4.sb.dfki.de"
+    EXTERNAL_PORT = "32004"
+    IMAGE = "ghcr.io/davhov/pytorch-code-server:26.04-py3"
+
+    TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+    CA_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+    with open(TOKEN_PATH, "r", encoding="utf-8") as f:
+      TOKEN = f.read().strip()
+
+    SSL_CONTEXT = ssl.create_default_context(cafile=CA_PATH)
+
+    STORAGE_TYPES = {
+      "geneva-local-storage": {
+        "label": "Geneva local scratch storage",
+        "storage_class": "asr-geneva-local-path",
+        "node_name": "asr-geneva",
+      },
+    }
+
+    STORAGE_SIZES = ["500Gi", "1Ti", "2Ti"]
+
+    def api_request(method, path, body=None):
+      data = None
+      headers = {
+        "Authorization": f"Bearer {TOKEN}",
+        "Accept": "application/json",
+      }
+      if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+      req = urllib.request.Request(API_BASE + path, data=data, headers=headers, method=method)
+      try:
+        with urllib.request.urlopen(req, context=SSL_CONTEXT, timeout=20) as resp:
+          raw = resp.read()
+          if not raw:
+            return {}
+          return json.loads(raw.decode("utf-8"))
+      except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Kubernetes API {method} {path} failed with {exc.code}: {detail}") from exc
+
+    def exists(path):
+      try:
+        api_request("GET", path)
+        return True
+      except RuntimeError as exc:
+        if " failed with 404:" in str(exc):
+          return False
+        raise
+
+    def normalize_part(value, field):
+      value = re.sub(r"[^a-z0-9]", "", value.strip().lower())
+      if len(value) < 2:
+        raise ValueError(f"{field} must contain at least two ASCII letters or digits.")
+      return value[:2]
+
+    def name_key(first_name, last_name):
+      return re.sub(r"[^a-z0-9]", "", f"{first_name} {last_name}".strip().lower())
+
+    def workload_suffix(deployment_name):
+      value = re.sub(r"[^a-z0-9-]", "-", deployment_name.strip().lower())
+      value = re.sub(r"-+", "-", value).strip("-")
+      if not value:
+        value = "main"
+      if len(value) > 24:
+        value = value[:24].strip("-")
+      if not re.match(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", value):
+        raise ValueError("Deployment name must contain lowercase letters, digits, or hyphens.")
+      return value
+
+    def user_prefix(first_name, last_name):
+      return normalize_part(first_name, "First name") + normalize_part(last_name, "Last name")
+
+    def user_id_for(first_name, last_name):
+      prefix = user_prefix(first_name, last_name)
+      wanted_key = name_key(first_name, last_name)
+      existing = api_request("GET", "/api/v1/namespaces?labelSelector=aetna.dfki.de/onboarded-user%3Dtrue")
+      for item in existing.get("items", []):
+        meta = item.get("metadata", {})
+        ns_name = meta.get("name", "")
+        ann = meta.get("annotations", {})
+        existing_key = name_key(ann.get("aetna.dfki.de/first-name", ""), ann.get("aetna.dfki.de/last-name", ""))
+        if ns_name.startswith(prefix) and existing_key == wanted_key:
+          return ns_name, False
+      for index in range(1, 100):
+        candidate = f"{prefix}{index:02d}"
+        if not exists(f"/api/v1/namespaces/{candidate}"):
+          return candidate, True
+      raise ValueError(f"No free username found for prefix {prefix} in range 01-99.")
+
+    def storage_size(value):
+      value = value.strip()
+      if value not in STORAGE_SIZES:
+        raise ValueError("Unsupported storage size.")
+      return value
+
+    def resource_names(user_id, storage_type, deployment_name):
+      suffix = workload_suffix(deployment_name)
+      if suffix == "main":
+        return {
+          "suffix": suffix,
+          "pvc": f"{user_id}-{storage_type}",
+          "app": f"{user_id}-pytorch-code-server",
+          "ingress": f"{user_id}-code-server",
+          "path": f"/{user_id}-code-server(/|$)(.*)",
+          "url": f"https://{HOST_NAME}:{EXTERNAL_PORT}/{user_id}-code-server/",
+        }
+      return {
+        "suffix": suffix,
+        "pvc": f"{user_id}-{suffix}-{storage_type}",
+        "app": f"{user_id}-{suffix}-pytorch-code-server",
+        "ingress": f"{user_id}-{suffix}-code-server",
+        "path": f"/{user_id}-{suffix}-code-server(/|$)(.*)",
+        "url": f"https://{HOST_NAME}:{EXTERNAL_PORT}/{user_id}-{suffix}-code-server/",
+      }
+
+    def create_user(first_name, last_name, deployment_name, storage_type, size, gpu_count):
+      if storage_type not in STORAGE_TYPES:
+        raise ValueError("Unsupported storage type.")
+      if gpu_count not in ("1", "2", "3", "4"):
+        raise ValueError("Unsupported GPU count.")
+
+      size = storage_size(size)
+      storage = STORAGE_TYPES[storage_type]
+      user_id, create_namespace = user_id_for(first_name, last_name)
+      names = resource_names(user_id, storage_type, deployment_name)
+      pvc_name = names["pvc"]
+      app_name = names["app"]
+      ingress_name = names["ingress"]
+      url = names["url"]
+
+      if exists(f"/apis/apps/v1/namespaces/{user_id}/deployments/{app_name}") or exists(f"/api/v1/namespaces/{user_id}/persistentvolumeclaims/{pvc_name}"):
+        raise ValueError(f"Deployment '{names['suffix']}' already exists for {user_id}. Choose another deployment name.")
+
+      if create_namespace:
+        namespace = {
+          "apiVersion": "v1",
+          "kind": "Namespace",
+          "metadata": {
+            "name": user_id,
+            "labels": {
+              "aetna.dfki.de/onboarded-user": "true",
+              "aetna.dfki.de/user-id": user_id,
+            },
+            "annotations": {
+              "aetna.dfki.de/first-name": first_name,
+              "aetna.dfki.de/last-name": last_name,
+              "aetna.dfki.de/primary-url": url,
+            },
+          },
+        }
+        api_request("POST", "/api/v1/namespaces", namespace)
+
+        service_account = {
+          "apiVersion": "v1",
+          "kind": "ServiceAccount",
+          "metadata": {"name": user_id, "namespace": user_id},
+        }
+        api_request("POST", f"/api/v1/namespaces/{user_id}/serviceaccounts", service_account)
+
+        role_binding = {
+          "apiVersion": "rbac.authorization.k8s.io/v1",
+          "kind": "RoleBinding",
+          "metadata": {"name": f"{user_id}-edit", "namespace": user_id},
+          "subjects": [{"kind": "ServiceAccount", "name": user_id, "namespace": user_id}],
+          "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "edit"},
+        }
+        api_request("POST", f"/apis/rbac.authorization.k8s.io/v1/namespaces/{user_id}/rolebindings", role_binding)
+
+      pvc = {
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {
+          "name": pvc_name,
+          "namespace": user_id,
+          "labels": {
+            "aetna.dfki.de/workload": names["suffix"],
+            "aetna.dfki.de/user-id": user_id,
+          },
+        },
+        "spec": {
+          "accessModes": ["ReadWriteOnce"],
+          "resources": {"requests": {"storage": size}},
+          "storageClassName": storage["storage_class"],
+          "volumeMode": "Filesystem",
+        },
+      }
+      api_request("POST", f"/api/v1/namespaces/{user_id}/persistentvolumeclaims", pvc)
+
+      deployment = {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+          "name": app_name,
+          "namespace": user_id,
+          "labels": {
+            "aetna.dfki.de/workload": names["suffix"],
+            "aetna.dfki.de/user-id": user_id,
+          },
+          "annotations": {
+            "aetna.dfki.de/url": url,
+            "aetna.dfki.de/storage-type": storage_type,
+            "aetna.dfki.de/storage-size": size,
+          },
+        },
+        "spec": {
+          "replicas": 1,
+          "strategy": {"type": "Recreate"},
+          "selector": {"matchLabels": {"app": app_name}},
+          "template": {
+          "metadata": {"labels": {"app": app_name, "aetna.dfki.de/workload": names["suffix"]}},
+            "spec": {
+              "nodeSelector": {"kubernetes.io/hostname": storage["node_name"]},
+              "containers": [{
+                "name": "pytorch-code-server",
+                "image": IMAGE,
+                "imagePullPolicy": "Always",
+                "env": [{"name": "DEFAULT_WORKSPACE", "value": "/home/jovyan"}],
+                "ports": [
+                  {"name": "http-port", "containerPort": 8888, "protocol": "TCP"},
+                  {"name": "ssh-port", "containerPort": 22, "protocol": "TCP"},
+                ],
+                "resources": {
+                  "requests": {"nvidia.com/gpu": gpu_count},
+                  "limits": {"nvidia.com/gpu": gpu_count},
+                },
+                "volumeMounts": [
+                  {"name": "data-volume", "mountPath": "/home/jovyan"},
+                  {"name": "dshm", "mountPath": "/dev/shm"},
+                ],
+              }],
+              "volumes": [
+                {"name": "data-volume", "persistentVolumeClaim": {"claimName": pvc_name}},
+                {"name": "dshm", "emptyDir": {"medium": "Memory", "sizeLimit": "16Gi"}},
+              ],
+            },
+          },
+        },
+      }
+      api_request("POST", f"/apis/apps/v1/namespaces/{user_id}/deployments", deployment)
+
+      service = {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+          "name": app_name,
+          "namespace": user_id,
+          "labels": {
+            "aetna.dfki.de/workload": names["suffix"],
+            "aetna.dfki.de/user-id": user_id,
+          },
+        },
+        "spec": {
+          "type": "ClusterIP",
+          "selector": {"app": app_name},
+          "ports": [{"name": "http", "port": 80, "targetPort": "http-port", "protocol": "TCP"}],
+        },
+      }
+      api_request("POST", f"/api/v1/namespaces/{user_id}/services", service)
+
+      ingress = {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "Ingress",
+        "metadata": {
+          "name": ingress_name,
+          "namespace": user_id,
+          "labels": {
+            "aetna.dfki.de/workload": names["suffix"],
+            "aetna.dfki.de/user-id": user_id,
+          },
+          "annotations": {
+            "aetna.dfki.de/url": url,
+            "nginx.ingress.kubernetes.io/proxy-read-timeout": "3600",
+            "nginx.ingress.kubernetes.io/proxy-send-timeout": "3600",
+            "nginx.ingress.kubernetes.io/rewrite-target": "/$2",
+            "nginx.ingress.kubernetes.io/use-regex": "true",
+          },
+        },
+        "spec": {
+          "ingressClassName": "nginx",
+          "rules": [{
+            "host": HOST_NAME,
+            "http": {"paths": [{
+              "path": names["path"],
+              "pathType": "ImplementationSpecific",
+              "backend": {"service": {"name": app_name, "port": {"number": 80}}},
+            }]},
+          }],
+        },
+      }
+      api_request("POST", f"/apis/networking.k8s.io/v1/namespaces/{user_id}/ingresses", ingress)
+
+      return {"user_id": user_id, "deployment": names["suffix"], "url": url, "pvc": pvc_name, "storage": size, "storage_type": storage_type}
+
+    def delete_user(user_id):
+      if not re.match(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", user_id):
+        raise ValueError("Invalid user id.")
+      if not exists(f"/api/v1/namespaces/{user_id}"):
+        raise ValueError(f"Namespace {user_id} does not exist.")
+      api_request("DELETE", f"/api/v1/namespaces/{user_id}")
+      return user_id
+
+    def list_users():
+      ns = api_request("GET", "/api/v1/namespaces?labelSelector=aetna.dfki.de/onboarded-user%3Dtrue")
+      users = []
+      for item in ns.get("items", []):
+        meta = item.get("metadata", {})
+        if meta.get("deletionTimestamp"):
+          continue
+        ann = meta.get("annotations", {})
+        user_id = meta.get("name", "")
+        deployments = api_request("GET", f"/apis/apps/v1/namespaces/{user_id}/deployments")
+        if not deployments.get("items"):
+          users.append({
+            "user_id": user_id,
+            "first_name": ann.get("aetna.dfki.de/first-name", ""),
+            "last_name": ann.get("aetna.dfki.de/last-name", ""),
+            "deployment": "",
+            "storage_type": "",
+            "storage_size": "",
+            "url": ann.get("aetna.dfki.de/primary-url", f"https://{HOST_NAME}:{EXTERNAL_PORT}/{user_id}-code-server/"),
+          })
+          continue
+        for deployment in deployments.get("items", []):
+          dmeta = deployment.get("metadata", {})
+          dann = dmeta.get("annotations", {})
+          labels = dmeta.get("labels", {})
+          deployment_name = dmeta.get("name", "")
+          workload = labels.get("aetna.dfki.de/workload", "")
+          if not workload:
+            workload = "main" if deployment_name == f"{user_id}-pytorch-code-server" else deployment_name
+          users.append({
+            "user_id": user_id,
+            "first_name": ann.get("aetna.dfki.de/first-name", ""),
+            "last_name": ann.get("aetna.dfki.de/last-name", ""),
+            "deployment": workload,
+            "storage_type": dann.get("aetna.dfki.de/storage-type", ""),
+            "storage_size": dann.get("aetna.dfki.de/storage-size", ""),
+            "url": dann.get("aetna.dfki.de/url", f"https://{HOST_NAME}:{EXTERNAL_PORT}/{user_id}-code-server/"),
+          })
+      return sorted(users, key=lambda u: (u["user_id"], u["deployment"]))
+
+    def page(message=None, error=None):
+      users = list_users()
+      rows = "".join(
+        f"<tr><td>{html.escape(u['user_id'])}</td><td>{html.escape(u['first_name'])} {html.escape(u['last_name'])}</td>"
+        f"<td>{html.escape(u['deployment'])}</td><td>{html.escape(u['storage_type'])}</td><td>{html.escape(u['storage_size'])}</td>"
+        f"<td><a href='{html.escape(u['url'])}' target='_blank'>Open</a></td>"
+        f"<td><form method='post' action='/onboarding/' class='inline-form' onsubmit=\"return confirm('Delete namespace {html.escape(u['user_id'])} and all its deployments?');\">"
+        f"<input type='hidden' name='action' value='delete_user'><input type='hidden' name='user_id' value='{html.escape(u['user_id'])}'>"
+        f"<button class='icon-button' title='Delete user' aria-label='Delete user'>Del</button></form></td></tr>"
+        for u in users
+      ) or "<tr><td colspan='7' class='muted'>No onboarded users yet.</td></tr>"
+
+      size_options = "".join(f"<option value='{s}'>{s}</option>" for s in STORAGE_SIZES)
+      storage_options = "".join(
+        f"<option value='{key}'>{html.escape(value['label'])}</option>"
+        for key, value in STORAGE_TYPES.items()
+      )
+
+      notice = f"<div class='notice'>{html.escape(message)}</div>" if message else ""
+      problem = f"<div class='error'>{html.escape(error)}</div>" if error else ""
+
+      return f"""<!doctype html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <title>Aetna Onboarding</title>
+      <style>
+        :root {{ color-scheme: light; font-family: Arial, Helvetica, sans-serif; }}
+        body {{ margin: 0; background: #f5f7fb; color: #172033; }}
+        header {{ background: #ffffff; border-bottom: 1px solid #d9e0ea; padding: 18px 32px; display: flex; align-items: center; gap: 18px; }}
+        .logo {{ width: 92px; height: 42px; background: #0b4ea2; color: white; display: grid; place-items: center; font-weight: 800; letter-spacing: .08em; border-radius: 4px; }}
+        h1 {{ margin: 0; font-size: 24px; }}
+        main {{ max-width: 1180px; margin: 28px auto; padding: 0 24px; display: grid; grid-template-columns: 360px 1fr; gap: 24px; }}
+        section {{ background: white; border: 1px solid #d9e0ea; border-radius: 8px; padding: 20px; box-shadow: 0 1px 2px rgba(16, 24, 40, .05); }}
+        label {{ display: block; margin-top: 14px; font-weight: 700; font-size: 14px; }}
+        input, select {{ width: 100%; box-sizing: border-box; margin-top: 6px; padding: 10px 12px; border: 1px solid #b8c2d0; border-radius: 6px; font-size: 15px; }}
+        button {{ margin-top: 18px; width: 100%; padding: 11px 14px; background: #0b4ea2; color: white; border: 0; border-radius: 6px; font-size: 15px; font-weight: 700; cursor: pointer; }}
+        .inline-form {{ margin: 0; }}
+        .icon-button {{ width: 34px; height: 34px; margin: 0; padding: 0; background: #b42318; border-radius: 6px; line-height: 1; }}
+        table {{ width: 100%; border-collapse: collapse; font-size: 14px; }}
+        th, td {{ text-align: left; padding: 10px 8px; border-bottom: 1px solid #e4e9f0; }}
+        th {{ color: #46566d; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }}
+        a {{ color: #0b4ea2; font-weight: 700; }}
+        .muted {{ color: #6b7688; }}
+        .notice, .error {{ grid-column: 1 / -1; padding: 12px 14px; border-radius: 6px; margin-bottom: -8px; }}
+        .notice {{ background: #e7f7ee; color: #126239; border: 1px solid #b7e4c7; }}
+        .error {{ background: #fff0f0; color: #9d1c1c; border: 1px solid #f3b8b8; }}
+        @media (max-width: 880px) {{ main {{ grid-template-columns: 1fr; }} }}
+      </style>
+    </head>
+    <body>
+      <header>
+        <div class="logo">DFKI</div>
+        <div>
+          <h1>Aetna New Cluster Onboarding</h1>
+          <div class="muted">Create PyTorch code-server workspaces on the new cluster only.</div>
+        </div>
+      </header>
+      <main>
+        {notice}
+        {problem}
+        <section>
+          <h2>Create User</h2>
+          <form method="post" action="/onboarding/">
+            <input type="hidden" name="action" value="create_user">
+            <label>First name<input name="first_name" autocomplete="given-name" required></label>
+            <label>Surname<input name="last_name" autocomplete="family-name" required></label>
+            <label>Deployment name<input name="deployment_name" value="main" required></label>
+            <label>Storage type<select name="storage_type">{storage_options}</select></label>
+            <label>Storage amount<select name="storage_size">{size_options}</select></label>
+            <label>GPU count<select name="gpu_count"><option value="1">1 GPU</option><option value="2">2 GPUs</option><option value="3">3 GPUs</option><option value="4">4 GPUs</option></select></label>
+            <button type="submit">Create Onboarding</button>
+          </form>
+        </section>
+        <section>
+          <h2>Onboarded Users</h2>
+          <table>
+            <thead><tr><th>User</th><th>Name</th><th>Deployment</th><th>Storage</th><th>Size</th><th>Link</th><th>Delete</th></tr></thead>
+            <tbody>{rows}</tbody>
+          </table>
+        </section>
+      </main>
+    </body>
+    </html>"""
+
+    class Handler(BaseHTTPRequestHandler):
+      def send_html(self, content, status=200):
+        data = content.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+      def do_GET(self):
+        if self.path in ("/healthz", "/readyz"):
+          self.send_response(200)
+          self.end_headers()
+          self.wfile.write(b"ok")
+          return
+        self.send_html(page())
+
+      def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        form = parse_qs(self.rfile.read(length).decode("utf-8"))
+        try:
+          action = form.get("action", ["create_user"])[0]
+          if action == "delete_user":
+            user_id = delete_user(form.get("user_id", [""])[0])
+            self.send_html(page(message=f"Deleted {user_id} and all deployments in that namespace."))
+            return
+          result = create_user(
+            form.get("first_name", [""])[0],
+            form.get("last_name", [""])[0],
+            form.get("deployment_name", ["main"])[0],
+            form.get("storage_type", [""])[0],
+            form.get("storage_size", [""])[0],
+            form.get("gpu_count", ["1"])[0],
+          )
+          self.send_html(page(message=f"Created {result['user_id']} / {result['deployment']}: {result['url']}"))
+        except Exception as exc:
+          self.send_html(page(error=str(exc)), status=400)
+
+      def log_message(self, fmt, *args):
+        print("%s - - %s" % (self.address_string(), fmt % args), flush=True)
+
+    if __name__ == "__main__":
+      server = ThreadingHTTPServer(("0.0.0.0", 8080), Handler)
+      print("Onboarding portal listening on 0.0.0.0:8080", flush=True)
+      server.serve_forever()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: onboarding-portal
+  namespace: onboarding
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: onboarding-portal
+  template:
+    metadata:
+      labels:
+        app: onboarding-portal
+    spec:
+      serviceAccountName: onboarding-portal
+      containers:
+        - name: onboarding-portal
+          image: python:3.12-slim
+          imagePullPolicy: IfNotPresent
+          command: ["python", "/app/app.py"]
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          volumeMounts:
+            - name: app
+              mountPath: /app
+              readOnly: true
+      volumes:
+        - name: app
+          configMap:
+            name: onboarding-portal-app
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: onboarding-portal
+  namespace: onboarding
+spec:
+  type: ClusterIP
+  selector:
+    app: onboarding-portal
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: onboarding-portal
+  namespace: onboarding
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    nginx.ingress.kubernetes.io/use-regex: "true"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: usg-demo-4.sb.dfki.de
+      http:
+        paths:
+          - path: /onboarding(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: onboarding-portal
+                port:
+                  number: 80

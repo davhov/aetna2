@@ -1,0 +1,146 @@
+# Baseline PyTorch code-server workload for one user on the new Aetna cluster only.
+# Do not apply this to the old production cluster or with aetna-2.yaml.
+#
+# Copy this file for each user and replace every USER_ID value with the
+# user's namespace-safe identifier, for example daho03, igvo01, or mopu01.
+# The onboarding script scripts/onboard-pytorch-code-server-user.ps1 does
+# this automatically from first name and surname, and should be run with
+# the new-cluster kubeconfig .\local.yaml.
+#
+# The browser URL after applying this template is:
+#   https://usg-demo-4.sb.dfki.de:32004/USER_ID-code-server/
+#
+# Important:
+# - USER_ID must be lowercase DNS-safe text: a-z, 0-9, and hyphen.
+# - Do not set runtimeClassName. This cluster uses GPU Operator CDI/NRI mode.
+# - The pod gets one GPU through nvidia.com/gpu requests/limits.
+# - The ingress is intentionally open and has no login prompt.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: USER_ID
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: USER_ID
+  namespace: USER_ID
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: USER_ID-edit
+  namespace: USER_ID
+subjects:
+  - kind: ServiceAccount
+    name: USER_ID
+    namespace: USER_ID
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: edit
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: USER_ID-geneva-local-storage
+  namespace: USER_ID
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 500Gi
+  storageClassName: asr-geneva-local-path
+  volumeMode: Filesystem
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: USER_ID-pytorch-code-server
+  namespace: USER_ID
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: USER_ID-pytorch-code-server
+  template:
+    metadata:
+      labels:
+        app: USER_ID-pytorch-code-server
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: asr-geneva
+      containers:
+        - name: pytorch-code-server
+          image: ghcr.io/davhov/pytorch-code-server:26.04-py3
+          imagePullPolicy: Always
+          env:
+            - name: DEFAULT_WORKSPACE
+              value: /home/jovyan
+          ports:
+            - name: http-port
+              containerPort: 8888
+              protocol: TCP
+            - name: ssh-port
+              containerPort: 22
+              protocol: TCP
+          resources:
+            requests:
+              nvidia.com/gpu: "1"
+            limits:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: data-volume
+              mountPath: /home/jovyan
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: data-volume
+          persistentVolumeClaim:
+            claimName: USER_ID-geneva-local-storage
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: USER_ID-pytorch-code-server
+  namespace: USER_ID
+spec:
+  type: ClusterIP
+  selector:
+    app: USER_ID-pytorch-code-server
+  ports:
+    - name: http
+      port: 80
+      targetPort: http-port
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: USER_ID-code-server
+  namespace: USER_ID
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    nginx.ingress.kubernetes.io/use-regex: "true"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: usg-demo-4.sb.dfki.de
+      http:
+        paths:
+          - path: /USER_ID-code-server(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: USER_ID-pytorch-code-server
+                port:
+                  number: 80
