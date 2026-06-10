@@ -641,7 +641,7 @@ data:
       rows = "".join(
         f"<tr><td>{html.escape(u['user_id'])}</td><td>{html.escape(u['first_name'])} {html.escape(u['last_name'])}</td>"
         f"<td>{html.escape(u['deployment'])}</td><td>{html.escape(u['storage_type'])}</td><td>{html.escape(u['storage_size'])}</td>"
-        f"<td><a href='{html.escape(u['url'])}' target='_blank'>Open</a></td>"
+        f"<td><button type='button' class='link-button' data-url='{html.escape(u['url'])}' onclick='openUrl(this.dataset.url)'>Open</button></td>"
         f"<td><form method='post' action='' class='inline-form' onsubmit=\"return confirm('Delete namespace {html.escape(u['user_id'])} and all its deployments?');\">"
         f"<input type='hidden' name='action' value='delete_user'><input type='hidden' name='user_id' value='{html.escape(u['user_id'])}'>"
         f"<button class='icon-button' title='Delete user' aria-label='Delete user'>Del</button></form></td></tr>"
@@ -684,6 +684,7 @@ data:
         th, td {{ text-align: left; padding: 10px 8px; border-bottom: 1px solid #e4e9f0; }}
         th {{ color: #46566d; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }}
         a {{ color: #0b4ea2; font-weight: 700; }}
+        .link-button {{ width: auto; margin: 0; padding: 0; background: transparent; color: #0b4ea2; border: 0; font-weight: 700; cursor: pointer; }}
         .muted {{ color: #6b7688; }}
         .notice, .error {{ grid-column: 1 / -1; padding: 12px 14px; border-radius: 6px; margin-bottom: -8px; }}
         .notice {{ background: #e7f7ee; color: #126239; border: 1px solid #b7e4c7; }}
@@ -723,6 +724,11 @@ data:
           </table>
         </section>
       </main>
+      <script>
+        function openUrl(url) {{
+          window.open(url, "_blank", "noopener");
+        }}
+      </script>
     </body>
     </html>"""
 

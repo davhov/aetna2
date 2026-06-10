@@ -123,7 +123,7 @@ data:
         .status { padding: 10px 12px; background: #eef4ff; border: 1px solid #c7d7fe; border-radius: 6px; margin-bottom: 14px; }
         .error { padding: 10px 12px; background: #fff0f0; border: 1px solid #f3b8b8; color: #9d1c1c; border-radius: 6px; margin-bottom: 14px; }
         .admin-actions { display: none; margin-bottom: 14px; }
-        .admin-actions a { display: inline-flex; align-items: center; min-height: 36px; padding: 0 14px; border-radius: 6px; background: #0b4ea2; color: #fff; text-decoration: none; }
+        .admin-actions button { min-height: 36px; padding: 0 14px; border: 0; border-radius: 6px; background: #0b4ea2; color: #fff; font-weight: 700; cursor: pointer; }
       </style>
     </head>
     <body>
@@ -136,7 +136,7 @@ data:
       </header>
       <main>
         <div id="adminActions" class="admin-actions">
-          <a href="https://usg-demo-4.sb.dfki.de:32004/k8s/clusters/local/api/v1/namespaces/onboarding/services/http:onboarding-portal:80/proxy/" target="_blank">OnBoarding</a>
+          <button type="button" id="openOnboarding">OnBoarding</button>
         </div>
         <div id="message" class="status">Loading links...</div>
         <section class="panel">
@@ -157,6 +157,7 @@ data:
         const URL_ANNOTATION = "aetna.dfki.de/url";
         const FOLDER = "/home/jovyan";
         const ADMIN_NAMES = new Set(["daho03", "admin", "m-w2cj5", "user-vtnxs"]);
+        const ONBOARDING_PROXY_PATH = "/k8s/clusters/local/api/v1/namespaces/onboarding/services/http:onboarding-portal:80/proxy/";
 
         async function kube(path, options = {}) {
           const response = await fetch(CLUSTER_BASE + path, {
@@ -219,6 +220,9 @@ data:
             const admin = isAdmin(userInfo);
             if (admin) {
               document.getElementById("adminActions").style.display = "block";
+              document.getElementById("openOnboarding").onclick = () => {
+                window.open(window.location.origin + ONBOARDING_PROXY_PATH, "_blank", "noopener");
+              };
             }
             const selector = encodeURIComponent(USER_LABEL);
             if (!admin && !userId) {
