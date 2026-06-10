@@ -136,7 +136,7 @@ data:
       </header>
       <main>
         <div id="adminActions" class="admin-actions">
-          <a href="/k8s/clusters/local/api/v1/namespaces/onboarding/services/http:onboarding-portal:80/proxy/" target="_blank">OnBoarding</a>
+          <a href="https://usg-demo-4.sb.dfki.de:32004/k8s/clusters/local/api/v1/namespaces/onboarding/services/http:onboarding-portal:80/proxy/" target="_blank">OnBoarding</a>
         </div>
         <div id="message" class="status">Loading links...</div>
         <section class="panel">
