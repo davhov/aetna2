@@ -37,8 +37,45 @@ rules:
     resources: ["users"]
     verbs: ["get", "list", "create", "delete", "update", "patch"]
   - apiGroups: ["management.cattle.io"]
-    resources: ["globalrolebindings", "clusterroletemplatebindings"]
+    resources: ["clusterroletemplatebindings"]
     verbs: ["get", "list", "create", "delete", "update", "patch"]
+  - apiGroups: ["ui.cattle.io"]
+    resources: ["navlinks"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["management.cattle.io"]
+    resources: ["clusterroletemplatebindings"]
+    verbs: ["watch"]
+  - apiGroups: ["management.cattle.io"]
+    resources: ["projects"]
+    verbs: ["create"]
+  - apiGroups: ["management.cattle.io"]
+    resourceNames: ["local"]
+    resources: ["clusters"]
+    verbs: ["get"]
+  - apiGroups: ["management.cattle.io"]
+    resources: ["nodes", "nodepools", "clusterevents"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes", "persistentvolumes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apiregistration.k8s.io"]
+    resources: ["apiservices"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["catalog.cattle.io"]
+    resources: ["clusterrepos"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["cluster.x-k8s.io"]
+    resources: ["machines", "machinedeployments"]
+    verbs: ["get", "watch"]
+  - apiGroups: ["rke-machine-config.cattle.io", "rke-machine.cattle.io"]
+    resources: ["*"]
+    verbs: ["get", "watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["nodemetrics", "nodes"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "list", "create", "delete", "update", "patch"]
@@ -409,24 +446,8 @@ data:
           "mustChangePassword": True,
         }
         rancher_user = api_request("POST", "/apis/management.cattle.io/v3/users", rancher_user)
-      ensure_rancher_standard_user(user_id)
       ensure_rancher_cluster_member(user_id)
       ensure_rancher_password_secret(user_id, rancher_user)
-
-    def ensure_rancher_standard_user(user_id):
-      name = f"{user_id}-standard-user"
-      path = f"/apis/management.cattle.io/v3/globalrolebindings/{name}"
-      if exists(path):
-        return
-      binding = {
-        "apiVersion": "management.cattle.io/v3",
-        "kind": "GlobalRoleBinding",
-        "metadata": {"name": name},
-        "globalRoleName": "user",
-        "userName": user_id,
-        "userPrincipalName": f"local://{user_id}",
-      }
-      api_request("POST", "/apis/management.cattle.io/v3/globalrolebindings", binding)
 
     def ensure_rancher_cluster_member(user_id):
       name = f"{user_id}-local-cluster-member"
@@ -482,7 +503,6 @@ data:
       api_request("DELETE", f"/api/v1/namespaces/{user_id}")
       if exists(f"/apis/management.cattle.io/v3/users/{user_id}"):
         api_request("DELETE", f"/apis/management.cattle.io/v3/users/{user_id}")
-      delete_if_exists(f"/apis/management.cattle.io/v3/globalrolebindings/{user_id}-standard-user")
       delete_if_exists(f"/apis/management.cattle.io/v3/namespaces/local/clusterroletemplatebindings/{user_id}-local-cluster-member")
       delete_if_exists(f"/api/v1/namespaces/{PASSWORD_SECRET_NAMESPACE}/secrets/{user_id}")
       return user_id

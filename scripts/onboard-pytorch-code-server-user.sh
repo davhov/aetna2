@@ -201,14 +201,6 @@ enabled: true
 mustChangePassword: true
 ---
 apiVersion: management.cattle.io/v3
-kind: GlobalRoleBinding
-metadata:
-  name: ${USER_ID}-standard-user
-globalRoleName: user
-userName: ${USER_ID}
-userPrincipalName: local://${USER_ID}
----
-apiVersion: management.cattle.io/v3
 kind: ClusterRoleTemplateBinding
 metadata:
   name: ${USER_ID}-local-cluster-member
