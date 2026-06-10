@@ -163,28 +163,28 @@ The dashboard uses the new cluster's GPU Operator host-driver layout and collect
 
 ## Rancher Sidebar Code-Server Links
 
-The new cluster runs a small controller that keeps Rancher sidebar links in sync with onboarded code-server deployments:
+The new cluster runs a small controller that publishes one Rancher sidebar entry for all onboarded code-server deployments:
 
 ```text
 k8s/code-server-navlink-controller.yaml
 ```
 
-It watches Deployments labeled `aetna.dfki.de/user-id` and creates Rancher `NavLink` objects named `code-server-USER_ID-DEPLOYMENT`. The visible label is:
+It creates a single Rancher `NavLink` named `code-server-links` with label `Code Server Links`. The target is the controller's service proxy:
+
+```text
+https://usg-demo-4.sb.dfki.de:32004/k8s/clusters/local/api/v1/namespaces/kube-utils/services/http:code-server-links:80/proxy/
+```
+
+The page discovers Deployments labeled `aetna.dfki.de/user-id` and renders direct code-server URLs with the default workspace:
+
+```text
+https://usg-demo-4.sb.dfki.de:32004/USER_ID-DEPLOYMENT-code-server/?folder=/home/jovyan
+```
+
+The visible row label is:
 
 ```text
 USER_ID - DEPLOYMENT
 ```
 
-Example:
-
-```text
-chmu01 - test
-```
-
-The generated URL includes the default workspace:
-
-```text
-https://usg-demo-4.sb.dfki.de:32004/chmu01-test-code-server/?folder=/home/jovyan
-```
-
-When a deployment disappears, the controller removes the stale NavLink on the next sync.
+The dashboard filters in the browser with the logged-in Rancher session. Admin users such as `daho03` see links from all namespaces; onboarded users see only rows where the namespace or `aetna.dfki.de/user-id` label matches their Rancher username. The controller also removes old per-service `NavLink` objects labeled `aetna.dfki.de/code-server-navlink=true`, because Rancher `NavLink` objects are cluster-scoped and do not provide per-user visibility.

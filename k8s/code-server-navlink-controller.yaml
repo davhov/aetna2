@@ -14,9 +14,6 @@ kind: ClusterRole
 metadata:
   name: code-server-navlink-controller
 rules:
-  - apiGroups: ["apps"]
-    resources: ["deployments"]
-    verbs: ["get", "list", "watch"]
   - apiGroups: ["ui.cattle.io"]
     resources: ["navlinks"]
     verbs: ["get", "list", "create", "update", "patch", "delete"]
@@ -43,12 +40,13 @@ data:
   app.py: |
     import json
     import os
-    import re
     import ssl
+    import threading
     import time
     import urllib.error
     import urllib.parse
     import urllib.request
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     API = os.environ.get("KUBERNETES_SERVICE_HOST", "kubernetes.default.svc")
     PORT = os.environ.get("KUBERNETES_SERVICE_PORT_HTTPS", "443")
@@ -57,16 +55,176 @@ data:
     CA_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 
     SYNC_SECONDS = int(os.environ.get("SYNC_SECONDS", "60"))
-    MANAGED_LABEL = "aetna.dfki.de/code-server-navlink"
-    USER_LABEL = "aetna.dfki.de/user-id"
-    WORKLOAD_LABEL = "aetna.dfki.de/workload"
-    URL_ANNOTATION = "aetna.dfki.de/url"
-    FOLDER_QUERY = os.environ.get("CODE_SERVER_FOLDER_QUERY", "/home/jovyan")
+    HOST_NAME = os.environ.get("HOST_NAME", "usg-demo-4.sb.dfki.de")
+    EXTERNAL_PORT = os.environ.get("EXTERNAL_PORT", "32004")
+    CLUSTER_ID = os.environ.get("RANCHER_CLUSTER_ID", "local")
+
+    OLD_MANAGED_LABEL = "aetna.dfki.de/code-server-navlink"
+    DASHBOARD_LABEL = "aetna.dfki.de/code-server-links-dashboard"
+    DASHBOARD_NAME = "code-server-links"
+    DASHBOARD_URL = (
+        f"https://{HOST_NAME}:{EXTERNAL_PORT}/k8s/clusters/{CLUSTER_ID}"
+        "/api/v1/namespaces/kube-utils/services/http:code-server-links:80/proxy/"
+    )
 
     with open(TOKEN_PATH, "r", encoding="utf-8") as f:
         TOKEN = f.read().strip()
 
     SSL_CONTEXT = ssl.create_default_context(cafile=CA_PATH)
+
+    PAGE = r"""<!doctype html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <title>Code Server Links</title>
+      <style>
+        :root { color-scheme: light; font-family: Arial, Helvetica, sans-serif; }
+        body { margin: 0; background: #f5f7fb; color: #172033; }
+        header { background: #fff; border-bottom: 1px solid #d9e0ea; padding: 18px 28px; display: flex; align-items: center; gap: 16px; }
+        .logo { width: 86px; height: 40px; background: #0b4ea2; color: #fff; display: grid; place-items: center; font-weight: 800; letter-spacing: .08em; border-radius: 4px; }
+        h1 { margin: 0; font-size: 24px; }
+        main { max-width: 1180px; margin: 28px auto; padding: 0 24px; }
+        .panel { background: #fff; border: 1px solid #d9e0ea; border-radius: 8px; padding: 20px; box-shadow: 0 1px 2px rgba(16, 24, 40, .05); }
+        .toolbar { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 14px; }
+        .muted { color: #667085; }
+        table { width: 100%; border-collapse: collapse; font-size: 14px; }
+        th, td { text-align: left; padding: 11px 8px; border-bottom: 1px solid #e4e9f0; }
+        th { color: #46566d; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+        a { color: #0b4ea2; font-weight: 700; }
+        .status { padding: 10px 12px; background: #eef4ff; border: 1px solid #c7d7fe; border-radius: 6px; margin-bottom: 14px; }
+        .error { padding: 10px 12px; background: #fff0f0; border: 1px solid #f3b8b8; color: #9d1c1c; border-radius: 6px; margin-bottom: 14px; }
+      </style>
+    </head>
+    <body>
+      <header>
+        <div class="logo">DFKI</div>
+        <div>
+          <h1>Code Server Links</h1>
+          <div class="muted">Links are filtered using the current Rancher session.</div>
+        </div>
+      </header>
+      <main>
+        <div id="message" class="status">Loading links...</div>
+        <section class="panel">
+          <div class="toolbar">
+            <strong id="scope">Code-server services</strong>
+            <span class="muted" id="count"></span>
+          </div>
+          <table>
+            <thead><tr><th>Namespace</th><th>Deployment</th><th>Service</th><th>Link</th></tr></thead>
+            <tbody id="rows"><tr><td colspan="4" class="muted">Loading...</td></tr></tbody>
+          </table>
+        </section>
+      </main>
+      <script>
+        const CLUSTER_BASE = "/k8s/clusters/local";
+        const USER_LABEL = "aetna.dfki.de/user-id";
+        const WORKLOAD_LABEL = "aetna.dfki.de/workload";
+        const URL_ANNOTATION = "aetna.dfki.de/url";
+        const FOLDER = "/home/jovyan";
+        const ADMIN_NAMES = new Set(["daho03", "admin", "m-w2cj5", "user-vtnxs"]);
+
+        async function kube(path, options = {}) {
+          const response = await fetch(CLUSTER_BASE + path, {
+            credentials: "include",
+            headers: Object.assign({"Accept": "application/json"}, options.headers || {}),
+            method: options.method || "GET",
+            body: options.body,
+          });
+          if (!response.ok) {
+            const text = await response.text();
+            throw new Error(`${options.method || "GET"} ${path} failed with ${response.status}: ${text}`);
+          }
+          return response.json();
+        }
+
+        async function currentUser() {
+          const body = JSON.stringify({apiVersion: "authentication.k8s.io/v1", kind: "SelfSubjectReview"});
+          try {
+            const data = await kube("/apis/authentication.k8s.io/v1/selfsubjectreviews", {
+              method: "POST",
+              headers: {"Content-Type": "application/json"},
+              body,
+            });
+            return data.status && data.status.userInfo ? data.status.userInfo : {};
+          } catch (error) {
+            return {username: ""};
+          }
+        }
+
+        function userIdFrom(userInfo) {
+          const raw = String(userInfo.username || "");
+          if (raw.startsWith("local://")) return raw.slice("local://".length);
+          if (/^[a-z]{4}[0-9]{2}$/.test(raw)) return raw;
+          return raw;
+        }
+
+        function isAdmin(userInfo) {
+          const name = userIdFrom(userInfo);
+          const groups = userInfo.groups || [];
+          return ADMIN_NAMES.has(name) || groups.includes("system:masters");
+        }
+
+        function withFolder(url) {
+          const separator = url.includes("?") ? "&" : "?";
+          return `${url}${separator}folder=${encodeURIComponent(FOLDER)}`;
+        }
+
+        function serviceName(namespace, workload) {
+          return workload === "main" ? `${namespace}-pytorch-code-server` : `${namespace}-${workload}-pytorch-code-server`;
+        }
+
+        async function load() {
+          const message = document.getElementById("message");
+          const rows = document.getElementById("rows");
+          const count = document.getElementById("count");
+          const scope = document.getElementById("scope");
+          try {
+            const userInfo = await currentUser();
+            const userId = userIdFrom(userInfo);
+            const admin = isAdmin(userInfo);
+            const selector = encodeURIComponent(USER_LABEL);
+            const data = await kube(`/apis/apps/v1/deployments?labelSelector=${selector}`);
+            const links = [];
+            for (const item of data.items || []) {
+              const meta = item.metadata || {};
+              const labels = meta.labels || {};
+              const annotations = meta.annotations || {};
+              const namespace = meta.namespace || "";
+              const owner = labels[USER_LABEL] || namespace;
+              const workload = labels[WORKLOAD_LABEL] || "main";
+              const url = annotations[URL_ANNOTATION] || "";
+              if (!url) continue;
+              if (!admin && owner !== userId && namespace !== userId) continue;
+              links.push({namespace, workload, service: serviceName(namespace, workload), url: withFolder(url)});
+            }
+            links.sort((a, b) => `${a.namespace}/${a.workload}`.localeCompare(`${b.namespace}/${b.workload}`));
+            scope.textContent = admin ? "All code-server services" : `Code-server services for ${userId || "current user"}`;
+            count.textContent = `${links.length} link${links.length === 1 ? "" : "s"}`;
+            rows.innerHTML = links.length ? links.map(link => (
+              `<tr><td>${escapeHtml(link.namespace)}</td><td>${escapeHtml(link.workload)}</td><td>${escapeHtml(link.service)}</td>` +
+              `<td><a href="${escapeAttr(link.url)}" target="_blank">Open</a></td></tr>`
+            )).join("") : `<tr><td colspan="4" class="muted">No code-server links visible for this user.</td></tr>`;
+            message.className = "status";
+            message.textContent = admin ? "Admin view: showing all onboarded code-server links." : "User view: showing only links owned by your namespace.";
+          } catch (error) {
+            rows.innerHTML = `<tr><td colspan="4" class="muted">No links loaded.</td></tr>`;
+            message.className = "error";
+            message.textContent = error.message;
+          }
+        }
+
+        function escapeHtml(value) {
+          return String(value).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+        }
+        function escapeAttr(value) {
+          return escapeHtml(value);
+        }
+        load();
+      </script>
+    </body>
+    </html>"""
 
     def api_request(method, path, body=None):
         data = None
@@ -86,93 +244,79 @@ data:
             detail = exc.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"Kubernetes API {method} {path} failed with {exc.code}: {detail}") from exc
 
-    def navlink_name(namespace, workload):
-        value = re.sub(r"[^a-z0-9-]", "-", f"code-server-{namespace}-{workload}".lower())
-        value = re.sub(r"-+", "-", value).strip("-")
-        return value[:63].rstrip("-")
+    def exists(path):
+        try:
+            api_request("GET", path)
+            return True
+        except RuntimeError as exc:
+            if " failed with 404:" in str(exc):
+                return False
+            raise
 
-    def with_folder(url):
-        separator = "&" if "?" in url else "?"
-        return f"{url}{separator}folder={urllib.parse.quote(FOLDER_QUERY)}"
-
-    def desired_navlinks():
-        selector = urllib.parse.quote(USER_LABEL, safe="")
-        deployments = api_request("GET", f"/apis/apps/v1/deployments?labelSelector={selector}")
-        desired = {}
-        for item in deployments.get("items", []):
-            meta = item.get("metadata", {})
-            labels = meta.get("labels", {})
-            annotations = meta.get("annotations", {})
-            namespace = meta.get("namespace", "")
-            user_id = labels.get(USER_LABEL, namespace)
-            workload = labels.get(WORKLOAD_LABEL, "main")
-            url = annotations.get(URL_ANNOTATION, "")
-            if not namespace or not workload or not url:
-                continue
-
-            name = navlink_name(namespace, workload)
-            desired[name] = {
-                "apiVersion": "ui.cattle.io/v1",
-                "kind": "NavLink",
-                "metadata": {
-                    "name": name,
-                    "labels": {
-                        MANAGED_LABEL: "true",
-                        USER_LABEL: user_id,
-                        WORKLOAD_LABEL: workload,
-                    },
-                    "annotations": {
-                        URL_ANNOTATION: url,
-                        "aetna.dfki.de/namespace": namespace,
-                    },
-                },
-                "spec": {
-                    "group": "",
-                    "label": f"{namespace} - {workload}",
-                    "target": "_blank",
-                    "toURL": with_folder(url),
-                },
-            }
-        return desired
-
-    def existing_managed_navlinks():
-        selector = urllib.parse.quote(f"{MANAGED_LABEL}=true", safe="")
+    def delete_old_per_service_navlinks():
+        selector = urllib.parse.quote(f"{OLD_MANAGED_LABEL}=true", safe="")
         data = api_request("GET", f"/apis/ui.cattle.io/v1/navlinks?labelSelector={selector}")
-        return {item["metadata"]["name"]: item for item in data.get("items", [])}
+        deleted = 0
+        for item in data.get("items", []):
+            name = item.get("metadata", {}).get("name")
+            if name:
+                api_request("DELETE", f"/apis/ui.cattle.io/v1/navlinks/{name}")
+                deleted += 1
+        return deleted
 
-    def upsert_navlink(name, body, existing):
-        if name in existing:
-            current = existing[name]
-            if current.get("spec") == body["spec"] and current.get("metadata", {}).get("labels") == body["metadata"]["labels"]:
-                return "unchanged"
-            api_request("PUT", f"/apis/ui.cattle.io/v1/navlinks/{name}", body)
-            return "updated"
+    def ensure_dashboard_navlink():
+        body = {
+            "apiVersion": "ui.cattle.io/v1",
+            "kind": "NavLink",
+            "metadata": {
+                "name": DASHBOARD_NAME,
+                "labels": {DASHBOARD_LABEL: "true"},
+            },
+            "spec": {
+                "group": "",
+                "label": "Code Server Links",
+                "target": "_blank",
+                "toURL": DASHBOARD_URL,
+            },
+        }
+        path = f"/apis/ui.cattle.io/v1/navlinks/{DASHBOARD_NAME}"
+        if exists(path):
+            current = api_request("GET", path)
+            if current.get("spec") != body["spec"] or current.get("metadata", {}).get("labels") != body["metadata"]["labels"]:
+                api_request("PUT", path, body)
+                return "updated"
+            return "unchanged"
         api_request("POST", "/apis/ui.cattle.io/v1/navlinks", body)
         return "created"
 
-    def sync_once():
-        desired = desired_navlinks()
-        existing = existing_managed_navlinks()
-        counts = {"created": 0, "updated": 0, "unchanged": 0, "deleted": 0}
-
-        for name, body in desired.items():
-            result = upsert_navlink(name, body, existing)
-            counts[result] += 1
-
-        for name in sorted(set(existing) - set(desired)):
-            api_request("DELETE", f"/apis/ui.cattle.io/v1/navlinks/{name}")
-            counts["deleted"] += 1
-
-        print(f"synced code-server navlinks: {counts}", flush=True)
-
-    if __name__ == "__main__":
-        print("code-server navlink controller started", flush=True)
+    def sync_loop():
+        print("code-server links controller started", flush=True)
         while True:
             try:
-                sync_once()
+                deleted = delete_old_per_service_navlinks()
+                result = ensure_dashboard_navlink()
+                print(f"synced code-server links dashboard: navlink={result}, old_deleted={deleted}", flush=True)
             except Exception as exc:
                 print(f"sync failed: {exc}", flush=True)
             time.sleep(SYNC_SECONDS)
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            data = PAGE.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, fmt, *args):
+            print("%s - - %s" % (self.address_string(), fmt % args), flush=True)
+
+    if __name__ == "__main__":
+        threading.Thread(target=sync_loop, daemon=True).start()
+        server = ThreadingHTTPServer(("0.0.0.0", 8080), Handler)
+        print("code-server links dashboard listening on 0.0.0.0:8080", flush=True)
+        server.serve_forever()
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -202,6 +346,9 @@ spec:
               value: "60"
             - name: CODE_SERVER_FOLDER_QUERY
               value: "/home/jovyan"
+          ports:
+            - name: http
+              containerPort: 8080
           volumeMounts:
             - name: app
               mountPath: /app/app.py
@@ -211,3 +358,18 @@ spec:
         - name: app
           configMap:
             name: code-server-navlink-controller-app
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: code-server-links
+  namespace: kube-utils
+spec:
+  type: ClusterIP
+  selector:
+    app: code-server-navlink-controller
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
