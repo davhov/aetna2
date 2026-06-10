@@ -29,7 +29,7 @@ Main files:
 - `scripts/onboard-pytorch-code-server-user.sh`: Ubuntu/bash onboarding script.
 - `docs/onboarding-pytorch-code-server.md`: operator documentation and naming rules.
 
-The portal creates namespaces, namespace-scoped user rights, PVCs, Deployments, Services, and direct `us....-4` ingress links. It also supports named deployments per user and offboarding through the `Del` button.
+The portal creates namespaces, namespace-scoped user rights, PVCs, Deployments, Services, and direct `us....-4` ingress links. It also supports named deployments per user, GPU modes `0`, `1` through `10`, and `P`, plus offboarding through the `Del` button.
 
 The portal also creates a Rancher local user named `USER_ID`, plus the matching `cattle-local-user-passwords/USER_ID` password Secret for the initial Rancher UI password `qweasd123`. `mustChangePassword: true` is set on the Rancher User. Each user also receives the Rancher `user` global role and `cluster-member` access on the `local` cluster so the cluster appears in Rancher, while Kubernetes workload rights remain namespace-scoped. Code-server itself remains open/no-login.
 

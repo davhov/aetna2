@@ -98,6 +98,7 @@ data:
     }
 
     STORAGE_SIZES = ["500Gi", "1Ti", "2Ti"]
+    GPU_OPTIONS = ["0"] + [str(i) for i in range(1, 11)] + ["P"]
 
     def api_request(method, path, body=None):
       data = None
@@ -201,7 +202,8 @@ data:
     def create_user(first_name, last_name, deployment_name, storage_type, size, gpu_count):
       if storage_type not in STORAGE_TYPES:
         raise ValueError("Unsupported storage type.")
-      if gpu_count not in ("1", "2", "3", "4"):
+      gpu_count = gpu_count.strip().upper()
+      if gpu_count not in GPU_OPTIONS:
         raise ValueError("Unsupported GPU count.")
 
       size = storage_size(size)
@@ -276,6 +278,28 @@ data:
       }
       api_request("POST", f"/api/v1/namespaces/{user_id}/persistentvolumeclaims", pvc)
 
+      container = {
+        "name": "pytorch-code-server",
+        "image": IMAGE,
+        "imagePullPolicy": "Always",
+        "env": [{"name": "DEFAULT_WORKSPACE", "value": "/home/jovyan"}],
+        "ports": [
+          {"name": "http-port", "containerPort": 8888, "protocol": "TCP"},
+          {"name": "ssh-port", "containerPort": 22, "protocol": "TCP"},
+        ],
+        "volumeMounts": [
+          {"name": "data-volume", "mountPath": "/home/jovyan"},
+          {"name": "dshm", "mountPath": "/dev/shm"},
+        ],
+      }
+      if gpu_count in [str(i) for i in range(1, 11)]:
+        container["resources"] = {
+          "requests": {"nvidia.com/gpu": gpu_count},
+          "limits": {"nvidia.com/gpu": gpu_count},
+        }
+      elif gpu_count == "P":
+        container["securityContext"] = {"privileged": True}
+
       deployment = {
         "apiVersion": "apps/v1",
         "kind": "Deployment",
@@ -300,24 +324,7 @@ data:
           "metadata": {"labels": {"app": app_name, "aetna.dfki.de/workload": names["suffix"]}},
             "spec": {
               "nodeSelector": {"kubernetes.io/hostname": storage["node_name"]},
-              "containers": [{
-                "name": "pytorch-code-server",
-            "image": IMAGE,
-            "imagePullPolicy": "Always",
-            "env": [{"name": "DEFAULT_WORKSPACE", "value": "/home/jovyan"}],
-                "ports": [
-                  {"name": "http-port", "containerPort": 8888, "protocol": "TCP"},
-                  {"name": "ssh-port", "containerPort": 22, "protocol": "TCP"},
-                ],
-                "resources": {
-                  "requests": {"nvidia.com/gpu": gpu_count},
-                  "limits": {"nvidia.com/gpu": gpu_count},
-                },
-                "volumeMounts": [
-                  {"name": "data-volume", "mountPath": "/home/jovyan"},
-                  {"name": "dshm", "mountPath": "/dev/shm"},
-                ],
-              }],
+              "containers": [container],
               "volumes": [
                 {"name": "data-volume", "persistentVolumeClaim": {"claimName": pvc_name}},
                 {"name": "dshm", "emptyDir": {"medium": "Memory", "sizeLimit": "16Gi"}},
@@ -533,6 +540,10 @@ data:
       ) or "<tr><td colspan='7' class='muted'>No onboarded users yet.</td></tr>"
 
       size_options = "".join(f"<option value='{s}'>{s}</option>" for s in STORAGE_SIZES)
+      gpu_options = "".join(
+        f"<option value='{g}'>{'Privileged (all visible)' if g == 'P' else ('0 GPUs' if g == '0' else g + (' GPU' if g == '1' else ' GPUs'))}</option>"
+        for g in GPU_OPTIONS
+      )
       storage_options = "".join(
         f"<option value='{key}'>{html.escape(value['label'])}</option>"
         for key, value in STORAGE_TYPES.items()
@@ -591,7 +602,7 @@ data:
             <label>Deployment name<input name="deployment_name" value="main" required></label>
             <label>Storage type<select name="storage_type">{storage_options}</select></label>
             <label>Storage amount<select name="storage_size">{size_options}</select></label>
-            <label>GPU count<select name="gpu_count"><option value="1">1 GPU</option><option value="2">2 GPUs</option><option value="3">3 GPUs</option><option value="4">4 GPUs</option></select></label>
+            <label>GPU count<select name="gpu_count">{gpu_options}</select></label>
             <button type="submit">Create Onboarding</button>
           </form>
         </section>

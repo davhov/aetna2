@@ -74,7 +74,7 @@ The baseline creates:
 Important defaults:
 
 - Image: `ghcr.io/davhov/pytorch-code-server:26.04-py3`
-- GPU: one GPU through `nvidia.com/gpu: "1"`
+- GPU: default is one GPU through `nvidia.com/gpu: "1"`. The onboarding portal supports GPU modes `0`, `1` through `10`, and `P`; `0` omits GPU requests, numeric values request that many GPUs, and `P` runs privileged without a GPU request/limit so all device-visible GPUs can be seen.
 - Node pinning: `asr-geneva`
 - No `runtimeClassName`
 - Ingress is intentionally open, with no login prompt
@@ -107,7 +107,7 @@ It provides a DFKI-branded page with:
 - deployment name field
 - storage type selection
 - storage amount selection
-- GPU count selection
+- GPU mode selection: `0`, `1` through `10`, or `P` for privileged/no GPU request mode
 - an `Open` link for each deployment
 - a `Del` button for offboarding a user namespace and all deployments in it
 

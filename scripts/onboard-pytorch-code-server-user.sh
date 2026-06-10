@@ -31,7 +31,7 @@ Options:
   --kubectl PATH          kubectl binary path, default kubectl
   --storage-size SIZE     PVC size, default 500Gi. Examples: 500Gi, 1Ti
   --storage-type TYPE     Storage type, default geneva-local-storage
-  --gpu-count COUNT       GPU count, default 1
+  --gpu-count COUNT       GPU mode: 0, 1-10, or P. Default 1
   --output-dir PATH       Generated manifest directory
   --dry-run               Generate YAML only, do not apply
   -h, --help              Show this help
@@ -141,6 +141,35 @@ APP_NAME="${USER_ID}-pytorch-code-server"
 INGRESS_NAME="${USER_ID}-code-server"
 BROWSER_URL="https://${HOST_NAME}:${EXTERNAL_PORT}/${USER_ID}-code-server/"
 OUTPUT_PATH="${OUTPUT_DIR}/${USER_ID}-pytorch-code-server.yaml"
+
+GPU_COUNT="$(printf '%s' "$GPU_COUNT" | tr '[:lower:]' '[:upper:]')"
+case "$GPU_COUNT" in
+  0)
+    GPU_RESOURCE_BLOCK=""
+    ;;
+  [1-9]|10)
+    GPU_RESOURCE_BLOCK="$(cat <<EOF
+          resources:
+            requests:
+              nvidia.com/gpu: "${GPU_COUNT}"
+            limits:
+              nvidia.com/gpu: "${GPU_COUNT}"
+EOF
+)"
+    ;;
+  P)
+    GPU_RESOURCE_BLOCK="$(cat <<EOF
+          securityContext:
+            privileged: true
+EOF
+)"
+    ;;
+  *)
+    echo "Unsupported GPU mode: $GPU_COUNT" >&2
+    echo "Supported values: 0, 1-10, P" >&2
+    exit 2
+    ;;
+esac
 
 mkdir -p "$OUTPUT_DIR"
 
@@ -273,11 +302,7 @@ spec:
             - name: ssh-port
               containerPort: 22
               protocol: TCP
-          resources:
-            requests:
-              nvidia.com/gpu: "${GPU_COUNT}"
-            limits:
-              nvidia.com/gpu: "${GPU_COUNT}"
+${GPU_RESOURCE_BLOCK}
           volumeMounts:
             - name: data-volume
               mountPath: /home/jovyan

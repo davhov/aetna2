@@ -5,7 +5,7 @@ param(
   [string]$Kubectl = "kubectl",
   [string]$OutputDir = ".\generated\onboarding",
   [int]$StorageGi = 500,
-  [int]$GpuCount = 1,
+  [string]$GpuCount = "1",
   [string]$NodeName = "asr-geneva",
   [string]$StorageClass = "asr-geneva-local-path",
   [string]$HostName = "usg-demo-4.sb.dfki.de",
@@ -86,6 +86,27 @@ $ingressName = "$userId-code-server"
 $ingressPath = "/$userId-code-server(/|$)(.*)"
 $browserUrl = "https://${HostName}:${ExternalPort}/$userId-code-server/"
 $outputPath = Join-Path $OutputDir "$userId-pytorch-code-server.yaml"
+
+$gpuMode = $GpuCount.Trim().ToUpperInvariant()
+if ($gpuMode -notin @("0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "P")) {
+  throw "GpuCount must be 0, 1 through 10, or P."
+}
+
+$gpuResourceBlock = ""
+if ($gpuMode -match "^[1-9]$|^10$") {
+  $gpuResourceBlock = @"
+          resources:
+            requests:
+              nvidia.com/gpu: "$gpuMode"
+            limits:
+              nvidia.com/gpu: "$gpuMode"
+"@
+} elseif ($gpuMode -eq "P") {
+  $gpuResourceBlock = @"
+          securityContext:
+            privileged: true
+"@
+}
 
 $manifest = @"
 apiVersion: v1
@@ -217,11 +238,7 @@ spec:
             - name: ssh-port
               containerPort: 22
               protocol: TCP
-          resources:
-            requests:
-              nvidia.com/gpu: "$GpuCount"
-            limits:
-              nvidia.com/gpu: "$GpuCount"
+$gpuResourceBlock
           volumeMounts:
             - name: data-volume
               mountPath: /home/jovyan
