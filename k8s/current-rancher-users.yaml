@@ -1,0 +1,27 @@
+apiVersion: management.cattle.io/v3
+kind: User
+metadata:
+  name: chmu01
+  labels:
+    aetna.dfki.de/onboarded-user: "true"
+    aetna.dfki.de/user-id: chmu01
+displayName: Christian Muller
+description: Aetna onboarded user chmu01
+username: chmu01
+password: qweasd123
+enabled: true
+mustChangePassword: true
+---
+apiVersion: management.cattle.io/v3
+kind: User
+metadata:
+  name: igvo01
+  labels:
+    aetna.dfki.de/onboarded-user: "true"
+    aetna.dfki.de/user-id: igvo01
+displayName: Igor Vozniak
+description: Aetna onboarded user igvo01
+username: igvo01
+password: qweasd123
+enabled: true
+mustChangePassword: true

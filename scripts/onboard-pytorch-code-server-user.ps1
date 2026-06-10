@@ -102,6 +102,20 @@ metadata:
     aetna.dfki.de/storage-size: ${StorageGi}Gi
     aetna.dfki.de/url: $browserUrl
 ---
+apiVersion: management.cattle.io/v3
+kind: User
+metadata:
+  name: $userId
+  labels:
+    aetna.dfki.de/onboarded-user: "true"
+    aetna.dfki.de/user-id: $userId
+displayName: "$FirstName $LastName"
+description: Aetna onboarded user $userId
+username: $userId
+password: qweasd123
+enabled: true
+mustChangePassword: true
+---
 apiVersion: v1
 kind: ServiceAccount
 metadata:

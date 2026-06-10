@@ -1,0 +1,213 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kube-utils
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: code-server-navlink-controller
+  namespace: kube-utils
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: code-server-navlink-controller
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["ui.cattle.io"]
+    resources: ["navlinks"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: code-server-navlink-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: code-server-navlink-controller
+subjects:
+  - kind: ServiceAccount
+    name: code-server-navlink-controller
+    namespace: kube-utils
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: code-server-navlink-controller-app
+  namespace: kube-utils
+data:
+  app.py: |
+    import json
+    import os
+    import re
+    import ssl
+    import time
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    API = os.environ.get("KUBERNETES_SERVICE_HOST", "kubernetes.default.svc")
+    PORT = os.environ.get("KUBERNETES_SERVICE_PORT_HTTPS", "443")
+    API_BASE = f"https://{API}:{PORT}"
+    TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+    CA_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+
+    SYNC_SECONDS = int(os.environ.get("SYNC_SECONDS", "60"))
+    MANAGED_LABEL = "aetna.dfki.de/code-server-navlink"
+    USER_LABEL = "aetna.dfki.de/user-id"
+    WORKLOAD_LABEL = "aetna.dfki.de/workload"
+    URL_ANNOTATION = "aetna.dfki.de/url"
+    FOLDER_QUERY = os.environ.get("CODE_SERVER_FOLDER_QUERY", "/home/jovyan")
+
+    with open(TOKEN_PATH, "r", encoding="utf-8") as f:
+        TOKEN = f.read().strip()
+
+    SSL_CONTEXT = ssl.create_default_context(cafile=CA_PATH)
+
+    def api_request(method, path, body=None):
+        data = None
+        headers = {
+            "Authorization": f"Bearer {TOKEN}",
+            "Accept": "application/json",
+        }
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(API_BASE + path, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, context=SSL_CONTEXT, timeout=20) as resp:
+                raw = resp.read()
+                return json.loads(raw.decode("utf-8")) if raw else {}
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Kubernetes API {method} {path} failed with {exc.code}: {detail}") from exc
+
+    def navlink_name(namespace, workload):
+        value = re.sub(r"[^a-z0-9-]", "-", f"code-server-{namespace}-{workload}".lower())
+        value = re.sub(r"-+", "-", value).strip("-")
+        return value[:63].rstrip("-")
+
+    def with_folder(url):
+        separator = "&" if "?" in url else "?"
+        return f"{url}{separator}folder={urllib.parse.quote(FOLDER_QUERY)}"
+
+    def desired_navlinks():
+        selector = urllib.parse.quote(USER_LABEL, safe="")
+        deployments = api_request("GET", f"/apis/apps/v1/deployments?labelSelector={selector}")
+        desired = {}
+        for item in deployments.get("items", []):
+            meta = item.get("metadata", {})
+            labels = meta.get("labels", {})
+            annotations = meta.get("annotations", {})
+            namespace = meta.get("namespace", "")
+            user_id = labels.get(USER_LABEL, namespace)
+            workload = labels.get(WORKLOAD_LABEL, "main")
+            url = annotations.get(URL_ANNOTATION, "")
+            if not namespace or not workload or not url:
+                continue
+
+            name = navlink_name(namespace, workload)
+            desired[name] = {
+                "apiVersion": "ui.cattle.io/v1",
+                "kind": "NavLink",
+                "metadata": {
+                    "name": name,
+                    "labels": {
+                        MANAGED_LABEL: "true",
+                        USER_LABEL: user_id,
+                        WORKLOAD_LABEL: workload,
+                    },
+                    "annotations": {
+                        URL_ANNOTATION: url,
+                        "aetna.dfki.de/namespace": namespace,
+                    },
+                },
+                "spec": {
+                    "group": "",
+                    "label": f"{namespace} - {workload}",
+                    "target": "_blank",
+                    "toURL": with_folder(url),
+                },
+            }
+        return desired
+
+    def existing_managed_navlinks():
+        selector = urllib.parse.quote(f"{MANAGED_LABEL}=true", safe="")
+        data = api_request("GET", f"/apis/ui.cattle.io/v1/navlinks?labelSelector={selector}")
+        return {item["metadata"]["name"]: item for item in data.get("items", [])}
+
+    def upsert_navlink(name, body, existing):
+        if name in existing:
+            current = existing[name]
+            if current.get("spec") == body["spec"] and current.get("metadata", {}).get("labels") == body["metadata"]["labels"]:
+                return "unchanged"
+            api_request("PUT", f"/apis/ui.cattle.io/v1/navlinks/{name}", body)
+            return "updated"
+        api_request("POST", "/apis/ui.cattle.io/v1/navlinks", body)
+        return "created"
+
+    def sync_once():
+        desired = desired_navlinks()
+        existing = existing_managed_navlinks()
+        counts = {"created": 0, "updated": 0, "unchanged": 0, "deleted": 0}
+
+        for name, body in desired.items():
+            result = upsert_navlink(name, body, existing)
+            counts[result] += 1
+
+        for name in sorted(set(existing) - set(desired)):
+            api_request("DELETE", f"/apis/ui.cattle.io/v1/navlinks/{name}")
+            counts["deleted"] += 1
+
+        print(f"synced code-server navlinks: {counts}", flush=True)
+
+    if __name__ == "__main__":
+        print("code-server navlink controller started", flush=True)
+        while True:
+            try:
+                sync_once()
+            except Exception as exc:
+                print(f"sync failed: {exc}", flush=True)
+            time.sleep(SYNC_SECONDS)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: code-server-navlink-controller
+  namespace: kube-utils
+  labels:
+    app: code-server-navlink-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: code-server-navlink-controller
+  template:
+    metadata:
+      labels:
+        app: code-server-navlink-controller
+    spec:
+      serviceAccountName: code-server-navlink-controller
+      containers:
+        - name: controller
+          image: python:3.12-slim
+          imagePullPolicy: IfNotPresent
+          command: ["python", "/app/app.py"]
+          env:
+            - name: SYNC_SECONDS
+              value: "60"
+            - name: CODE_SERVER_FOLDER_QUERY
+              value: "/home/jovyan"
+          volumeMounts:
+            - name: app
+              mountPath: /app/app.py
+              subPath: app.py
+              readOnly: true
+      volumes:
+        - name: app
+          configMap:
+            name: code-server-navlink-controller-app

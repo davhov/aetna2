@@ -61,6 +61,7 @@ https://usg-demo-4.sb.dfki.de:32004/daho03-code-server/
 The baseline creates:
 
 - Namespace `USER_ID`
+- Rancher local User `USER_ID`, with initial password `qweasd123` and `mustChangePassword: true`
 - ServiceAccount `USER_ID`
 - RoleBinding `USER_ID-edit`, bound to the built-in namespace-scoped `edit` ClusterRole
 - PVC `USER_ID-geneva-local-storage`, `500Gi`, StorageClass `asr-geneva-local-path`
@@ -76,6 +77,7 @@ Important defaults:
 - No `runtimeClassName`
 - Ingress is intentionally open, with no login prompt
 - `/dev/shm` is memory-backed and limited to `16Gi`
+- Rancher UI login password: initial password `qweasd123`; Rancher forces the user to change it after first login.
 
 The ServiceAccount and RoleBinding provide normal namespace-level Kubernetes rights. They do not grant cluster-admin permissions.
 
@@ -108,6 +110,7 @@ It provides a DFKI-branded page with:
 - a `Del` button for offboarding a user namespace and all deployments in it
 
 The portal creates the same Namespace, PVC, Deployment, Service, and Ingress pattern as the scripts.
+It also creates the matching Rancher local User `USER_ID` with initial password `qweasd123` and `mustChangePassword: true`.
 
 User IDs are generated from the first two characters of the first name plus the first two characters of the surname plus a numeric suffix. For example, `Igor Vozniak` becomes `igvo01` if that namespace is free.
 
@@ -123,6 +126,7 @@ Deployment naming:
   - Ingress URL: `https://usg-demo-4.sb.dfki.de:32004/USER_ID-DEPLOYMENT-code-server/`
 
 Offboarding from the portal deletes the whole user namespace. That removes the ServiceAccount, RoleBinding, PVCs, Deployments, Services, and Ingresses for that user. Kubernetes namespace deletion is asynchronous, so the namespace may remain visible in `kubectl` briefly while it is terminating.
+Offboarding also deletes the matching Rancher local User `USER_ID`.
 
 Operational note:
 
@@ -154,3 +158,31 @@ https://usg-demo-4.sb.dfki.de:32004/k8s/clusters/local/api/v1/namespaces/kube-ut
 ```
 
 The dashboard uses the new cluster's GPU Operator host-driver layout and collects from `gpu-operator` pods labeled `app=nvidia-dcgm-exporter`.
+
+## Rancher Sidebar Code-Server Links
+
+The new cluster runs a small controller that keeps Rancher sidebar links in sync with onboarded code-server deployments:
+
+```text
+k8s/code-server-navlink-controller.yaml
+```
+
+It watches Deployments labeled `aetna.dfki.de/user-id` and creates Rancher `NavLink` objects named `code-server-USER_ID-DEPLOYMENT`. The visible label is:
+
+```text
+USER_ID - DEPLOYMENT
+```
+
+Example:
+
+```text
+chmu01 - test
+```
+
+The generated URL includes the default workspace:
+
+```text
+https://usg-demo-4.sb.dfki.de:32004/chmu01-test-code-server/?folder=/home/jovyan
+```
+
+When a deployment disappears, the controller removes the stale NavLink on the next sync.

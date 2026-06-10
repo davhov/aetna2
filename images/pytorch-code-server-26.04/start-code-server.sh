@@ -17,4 +17,3 @@ exec sudo -E -H -u "$APP_USER" code-server \
   --bind-addr 0.0.0.0:8888 \
   --auth none \
   "$DEFAULT_WORKSPACE"
-
