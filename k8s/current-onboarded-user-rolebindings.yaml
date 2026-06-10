@@ -1,0 +1,33 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: chmu01-edit
+  namespace: chmu01
+subjects:
+  - kind: ServiceAccount
+    name: chmu01
+    namespace: chmu01
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: chmu01
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: edit
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: igvo01-edit
+  namespace: igvo01
+subjects:
+  - kind: ServiceAccount
+    name: igvo01
+    namespace: igvo01
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: igvo01
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: edit

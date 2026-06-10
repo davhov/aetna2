@@ -35,6 +35,9 @@ subjects:
   - kind: ServiceAccount
     name: USER_ID
     namespace: USER_ID
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: USER_ID
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole

@@ -117,6 +117,9 @@ subjects:
   - kind: ServiceAccount
     name: $userId
     namespace: $userId
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: $userId
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole

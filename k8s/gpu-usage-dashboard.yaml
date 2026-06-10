@@ -1,0 +1,533 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kube-utils
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: k8s-gpu-usage-service-account
+  namespace: kube-utils
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: k8s-gpu-usage-role
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: k8s-gpu-usage-role-bind
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: k8s-gpu-usage-role
+subjects:
+  - kind: ServiceAccount
+    name: k8s-gpu-usage-service-account
+    namespace: kube-utils
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: k8s-gpu-usage-ui-view
+  namespace: kube-utils
+rules:
+  - apiGroups: [""]
+    resources: ["services/proxy"]
+    resourceNames:
+      - http:k8s-gpu-usage:80
+      - https:k8s-gpu-usage:80
+      - k8s-gpu-usage:80
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: k8s-gpu-usage-ui-view-bind
+  namespace: kube-utils
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: k8s-gpu-usage-ui-view
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: Group
+    name: system:authenticated
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: k8s-gpu-usage-custom-app
+  namespace: kube-utils
+data:
+  app.py: |
+    #!/usr/bin/env python3
+    import html
+    import json
+    import logging
+    import os
+    import re
+    import subprocess
+    import time
+    from collections import defaultdict
+    from dataclasses import dataclass
+    from datetime import datetime
+
+    from flask import Flask, Response, request
+
+    try:
+        from flask_reverse_proxy import ReverseProxied
+    except Exception:
+        ReverseProxied = None
+
+    app = Flask(__name__, instance_relative_config=True)
+    if ReverseProxied:
+        app.wsgi_app = ReverseProxied(app.wsgi_app)
+
+    KUBECTL = os.environ.get("KUBECTL", "/usr/local/bin/kubectl")
+    OPERATOR_NAMESPACE = os.environ.get("GPU_OPERATOR_NAMESPACE", "gpu-operator")
+    COLLECTOR_LABEL = os.environ.get("GPU_COLLECTOR_LABEL", "app=nvidia-dcgm-exporter")
+    C_ENVIRONMENT = dict(os.environ, LC_ALL="C.UTF8", LANGUAGE="C")
+
+    LOG_PREFIX = re.compile(r"^[IWEF]\d{4} ")
+    GPU_STAT_RE = re.compile(r"^\s*(\d+),\s*(.+?),\s*(\d+),\s*(\d+),\s*(\d+)\s*$")
+    APP_RE = re.compile(r"^\s*(GPU-[0-9a-fA-F-]+),\s*(\d+),\s*(.*),\s*(\d+)\s*$")
+    UUID_RE = re.compile(r"^\s*(\d+),\s*(GPU-[0-9a-fA-F-]+)\s*$")
+    CGROUP_RE = re.compile(r"^(\d+)\|([^|]*)\|(.*)$")
+
+    @dataclass(frozen=True)
+    class PodRef:
+        namespace: str
+        name: str
+        node: str
+
+    @dataclass
+    class GpuStat:
+        index: int
+        uuid: str = ""
+        model: str = ""
+        memory_used_mib: int = 0
+        memory_total_mib: int = 0
+        utilization: int = 0
+
+    @dataclass(frozen=True)
+    class GpuApp:
+        gpu_uuid: str
+        pid: str
+        process: str
+        memory_mib: int
+
+    @dataclass(frozen=True)
+    class ProcOwner:
+        pod_uid: str
+        command: str
+
+    class K8sError(Exception):
+        pass
+
+    def run(cmd):
+        completed = subprocess.run(
+            cmd,
+            encoding="utf8",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=C_ENVIRONMENT,
+        )
+        if completed.returncode != 0:
+            raise K8sError(
+                "Command failed: {}<br><pre>{}</pre>".format(
+                    html.escape(" ".join(cmd)),
+                    html.escape(completed.stderr or completed.stdout),
+                )
+            )
+        return completed.stdout
+
+    def kubectl(args):
+        return run([KUBECTL] + args)
+
+    def clean_lines(text):
+        for raw in text.splitlines():
+            line = raw.strip()
+            if not line or LOG_PREFIX.match(line) or line.startswith("Defaulted container"):
+                continue
+            yield line
+
+    def mib_to_gib(value):
+        if value <= 3:
+            return "~0 GiB"
+        return "{:.1f} GiB".format(value / 1024)
+
+    def trim(value, limit=110):
+        value = (value or "").strip()
+        if len(value) <= limit:
+            return value
+        return value[: limit - 3] + "..."
+
+    def compact_command(process, command):
+        value = command.strip() or process.strip()
+        value = value.replace("/home/", "~/")
+        return trim(value)
+
+    def get_pods():
+        data = json.loads(kubectl(["get", "pods", "-A", "-o", "json"]))
+        pods = {}
+        for item in data.get("items", []):
+            pods[item["metadata"]["uid"]] = PodRef(
+                namespace=item["metadata"]["namespace"],
+                name=item["metadata"]["name"],
+                node=item.get("spec", {}).get("nodeName", ""),
+            )
+        return pods
+
+    def get_collectors():
+        data = json.loads(
+            kubectl(["-n", OPERATOR_NAMESPACE, "get", "pods", "-l", COLLECTOR_LABEL, "-o", "json"])
+        )
+        pods = []
+        for item in data.get("items", []):
+            if item.get("status", {}).get("phase") != "Running":
+                continue
+            pods.append({"name": item["metadata"]["name"], "node": item.get("spec", {}).get("nodeName", "")})
+        return sorted(pods, key=lambda pod: pod["node"])
+
+    def exec_collector(pod, script):
+        return kubectl(["-n", OPERATOR_NAMESPACE, "exec", pod, "--", "sh", "-c", script])
+
+    def collect_node(collector):
+        script = r"""
+    echo GPU_STATS
+    nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu --format=csv,noheader,nounits
+    echo UUIDS
+    nvidia-smi --query-gpu=index,uuid --format=csv,noheader,nounits
+    echo APPS
+    nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory --format=csv,noheader,nounits || true
+    echo CGROUPS
+    for p in $(nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits 2>/dev/null | sort -n | uniq); do
+      uid=$(cat /proc/$p/cgroup 2>/dev/null | sed -n "s/.*pod\([0-9a-f_]*\).*/\1/p" | head -1 | tr _ -)
+      cmd=$(tr "\0" " " < /proc/$p/cmdline 2>/dev/null | cut -c1-220)
+      echo "$p|$uid|$cmd"
+    done
+    """
+        output = exec_collector(collector["name"], script)
+        gpu_stats = {}
+        apps = []
+        owners = {}
+        section = ""
+
+        for line in clean_lines(output):
+            if line in {"GPU_STATS", "UUIDS", "APPS", "CGROUPS"}:
+                section = line
+                continue
+            if section == "GPU_STATS":
+                match = GPU_STAT_RE.match(line)
+                if match:
+                    index, model, used, total, util = match.groups()
+                    gpu_stats[int(index)] = GpuStat(
+                        index=int(index),
+                        model=model,
+                        memory_used_mib=int(used),
+                        memory_total_mib=int(total),
+                        utilization=int(util),
+                    )
+            elif section == "UUIDS":
+                match = UUID_RE.match(line)
+                if match:
+                    index, uuid = match.groups()
+                    gpu_stats.setdefault(int(index), GpuStat(index=int(index))).uuid = uuid
+            elif section == "APPS":
+                match = APP_RE.match(line)
+                if match:
+                    uuid, pid, process, memory = match.groups()
+                    apps.append(GpuApp(uuid, pid, process, int(memory)))
+            elif section == "CGROUPS":
+                match = CGROUP_RE.match(line)
+                if match:
+                    pid, uid, command = match.groups()
+                    owners[pid] = ProcOwner(uid, command)
+
+        return collector, gpu_stats, apps, owners
+
+    def build_rows():
+        pods = get_pods()
+        rows = []
+        for collector in get_collectors():
+            collector, gpu_stats, apps, owners = collect_node(collector)
+            apps_by_gpu = defaultdict(list)
+            for gpu_app in apps:
+                apps_by_gpu[gpu_app.gpu_uuid].append(gpu_app)
+
+            for gpu in sorted(gpu_stats.values(), key=lambda item: item.index):
+                gpu_apps = apps_by_gpu.get(gpu.uuid, [])
+                if not gpu_apps:
+                    rows.append({
+                        "node": collector["node"],
+                        "gpu": gpu.index,
+                        "model": gpu.model or "-",
+                        "utilization": gpu.utilization,
+                        "gpu_memory": mib_to_gib(gpu.memory_used_mib),
+                        "process_memory": "-",
+                        "namespace": "-",
+                        "pod": "-",
+                        "process": "idle" if gpu.memory_used_mib <= 3 else "memory allocated, no active process listed",
+                        "active": gpu.utilization > 0 or gpu.memory_used_mib > 3,
+                    })
+                    continue
+
+                grouped = defaultdict(list)
+                for gpu_app in gpu_apps:
+                    owner = owners.get(gpu_app.pid, ProcOwner("", ""))
+                    pod = pods.get(owner.pod_uid)
+                    namespace = pod.namespace if pod else "unknown"
+                    pod_name = pod.name if pod else "unknown"
+                    process = compact_command(gpu_app.process, owner.command)
+                    grouped[(namespace, pod_name, process)].append(gpu_app)
+
+                for (namespace, pod_name, process), grouped_apps in sorted(grouped.items()):
+                    rows.append({
+                        "node": collector["node"],
+                        "gpu": gpu.index,
+                        "model": gpu.model or "-",
+                        "utilization": gpu.utilization,
+                        "gpu_memory": mib_to_gib(gpu.memory_used_mib),
+                        "process_memory": mib_to_gib(sum(item.memory_mib for item in grouped_apps)),
+                        "namespace": namespace,
+                        "pod": pod_name,
+                        "process": "{} x{}".format(process, len(grouped_apps)) if len(grouped_apps) > 1 else process,
+                        "active": gpu.utilization > 0 or gpu.memory_used_mib > 3,
+                    })
+        return rows
+
+    def render_page(rows, elapsed):
+        generated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        active_count = sum(1 for row in rows if row["active"] and row["namespace"] != "-")
+        idle_count = sum(1 for row in rows if row["process"] == "idle")
+        body_rows = []
+        for row in rows:
+            util_class = "hot" if row["utilization"] >= 80 else "warm" if row["utilization"] > 0 else "quiet"
+            body_rows.append("""
+              <tr>
+                <td>{node}</td>
+                <td class="num">{gpu}</td>
+                <td>{model}</td>
+                <td class="num {util_class}">{utilization}%</td>
+                <td class="num">{gpu_memory}</td>
+                <td class="num">{process_memory}</td>
+                <td>{namespace}</td>
+                <td>{pod}</td>
+                <td class="cmd">{process}</td>
+              </tr>
+            """.format(util_class=util_class, **{k: html.escape(str(v)) for k, v in row.items()}))
+
+        return """<!doctype html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <meta http-equiv="refresh" content="30">
+      <title>GPU Usage Dashboard</title>
+      <style>
+        :root {{
+          color-scheme: light;
+          --bg: #f7f8fa;
+          --panel: #ffffff;
+          --ink: #1c232b;
+          --muted: #5c6670;
+          --line: #d9dee5;
+          --head: #eef2f6;
+          --hot: #b91c1c;
+          --warm: #8a5a00;
+          --quiet: #637083;
+        }}
+        * {{ box-sizing: border-box; }}
+        body {{
+          margin: 0;
+          background: var(--bg);
+          color: var(--ink);
+          font: 14px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }}
+        header {{
+          padding: 18px 24px 12px;
+          border-bottom: 1px solid var(--line);
+          background: var(--panel);
+        }}
+        h1 {{ margin: 0 0 8px; font-size: 22px; font-weight: 700; letter-spacing: 0; }}
+        .meta {{ display: flex; gap: 16px; flex-wrap: wrap; color: var(--muted); font-size: 13px; }}
+        main {{ padding: 18px 24px 28px; }}
+        .table-wrap {{ overflow: auto; border: 1px solid var(--line); background: var(--panel); }}
+        table {{ width: 100%; border-collapse: collapse; min-width: 1120px; }}
+        th, td {{
+          padding: 9px 10px;
+          border-bottom: 1px solid var(--line);
+          vertical-align: top;
+          text-align: left;
+          white-space: nowrap;
+        }}
+        th {{
+          position: sticky;
+          top: 0;
+          z-index: 1;
+          background: var(--head);
+          color: #2c3642;
+          font-size: 12px;
+          text-transform: uppercase;
+          letter-spacing: .04em;
+        }}
+        tr:hover td {{ background: #f2f6fb; }}
+        .num {{ text-align: right; font-variant-numeric: tabular-nums; }}
+        .cmd {{
+          white-space: normal;
+          min-width: 360px;
+          font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+          font-size: 12px;
+          color: #2b3440;
+        }}
+        .hot {{ color: var(--hot); font-weight: 700; }}
+        .warm {{ color: var(--warm); font-weight: 700; }}
+        .quiet {{ color: var(--quiet); }}
+        .error {{ margin: 20px 24px; padding: 14px 16px; border: 1px solid #f3b4b4; background: #fff1f1; color: #7f1d1d; }}
+      </style>
+    </head>
+    <body>
+      <header>
+        <h1>GPU Usage Dashboard</h1>
+        <div class="meta">
+          <span>Generated: {generated}</span>
+          <span>Refresh: 30s</span>
+          <span>Rows with pod owners: {active_count}</span>
+          <span>Idle GPUs: {idle_count}</span>
+          <span>Collection time: {elapsed:.1f}s</span>
+        </div>
+      </header>
+      <main>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Node</th>
+                <th>GPU</th>
+                <th>Model</th>
+                <th>Util</th>
+                <th>GPU Mem</th>
+                <th>Process Mem</th>
+                <th>Namespace</th>
+                <th>Pod</th>
+                <th>Process / command</th>
+              </tr>
+            </thead>
+            <tbody>{rows}</tbody>
+          </table>
+        </div>
+      </main>
+    </body>
+    </html>""".format(
+            generated=html.escape(generated),
+            active_count=active_count,
+            idle_count=idle_count,
+            elapsed=elapsed,
+            rows="\n".join(body_rows),
+        )
+
+    @app.route("/")
+    @app.route("/<path:_path>")
+    def index(_path=None):
+        if request.method == "HEAD":
+            return Response("", mimetype="text/html")
+        started = time.time()
+        try:
+            rows = build_rows()
+            return Response(render_page(rows, time.time() - started), mimetype="text/html")
+        except Exception as error:
+            logging.exception("Could not render GPU dashboard")
+            return Response(
+                "<html><body><div class='error'><h1>GPU Usage Dashboard failed</h1><p>{}</p></div></body></html>".format(
+                    html.escape(str(error))
+                ),
+                status=500,
+                mimetype="text/html",
+            )
+
+    if __name__ == "__main__":
+        logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
+        port = int(os.environ.get("PORT", 5000))
+        app.run(host="0.0.0.0", port=port)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k8s-gpu-usage
+  namespace: kube-utils
+  labels:
+    app: k8s-gpu-usage
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: k8s-gpu-usage
+  template:
+    metadata:
+      labels:
+        app: k8s-gpu-usage
+    spec:
+      serviceAccountName: k8s-gpu-usage-service-account
+      containers:
+        - name: k8s-gpu-usage
+          image: ghcr.io/dmrub/k8s-gpu-usage:latest
+          imagePullPolicy: Always
+          env:
+            - name: GPU_OPERATOR_NAMESPACE
+              value: gpu-operator
+            - name: GPU_COLLECTOR_LABEL
+              value: app=nvidia-dcgm-exporter
+          ports:
+            - containerPort: 5000
+              name: http
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /app/app.py
+              name: custom-app
+              readOnly: true
+              subPath: app.py
+      volumes:
+        - name: custom-app
+          configMap:
+            name: k8s-gpu-usage-custom-app
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: k8s-gpu-usage
+  namespace: kube-utils
+  labels:
+    service: k8s-gpu-usage
+spec:
+  selector:
+    app: k8s-gpu-usage
+  ports:
+    - name: http
+      port: 80
+      protocol: TCP
+      targetPort: http
+---
+apiVersion: ui.cattle.io/v1
+kind: NavLink
+metadata:
+  name: gpu-usage-dashboard
+spec:
+  group: ""
+  label: GPU Usage Dashboard
+  target: _blank
+  toURL: https://usg-demo-4.sb.dfki.de:32004/k8s/clusters/local/api/v1/namespaces/kube-utils/services/http:k8s-gpu-usage:80/proxy/

@@ -30,4 +30,12 @@ Main files:
 
 The portal creates namespaces, namespace-scoped user rights, PVCs, Deployments, Services, and direct `us....-4` ingress links. It also supports named deployments per user and offboarding through the `Del` button.
 
+## GPU Usage Dashboard
 
+The new cluster GPU dashboard is defined in:
+
+```text
+k8s/gpu-usage-dashboard.yaml
+```
+
+It deploys `kube-utils/k8s-gpu-usage` and a Rancher `NavLink` named `gpu-usage-dashboard`, matching the production cluster pattern. The new cluster uses GPU Operator host-driver mode, so the dashboard collects through `gpu-operator` pods labeled `app=nvidia-dcgm-exporter`.

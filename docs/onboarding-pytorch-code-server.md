@@ -79,6 +79,13 @@ Important defaults:
 
 The ServiceAccount and RoleBinding provide normal namespace-level Kubernetes rights. They do not grant cluster-admin permissions.
 
+The RoleBinding includes both:
+
+- ServiceAccount `USER_ID`
+- Kubernetes User `USER_ID`
+
+This lets service-account based access and username-based Rancher/Kubernetes access see the same namespace-scoped services. Admins can see all namespaces and services from Rancher; a normal user identity matching `USER_ID` should only need access to its own namespace resources.
+
 The script refuses to run unless the kubeconfig points to the new Rancher-proxied cluster endpoint `https://usg-demo-4.sb.dfki.de:32004/k8s/clusters/local`.
 
 ## Web Onboarding Portal
@@ -122,3 +129,28 @@ Operational note:
 - The portal ServiceAccount is granted a narrow `bind` permission on the built-in `edit` ClusterRole so it can create each user's namespace-scoped `USER_ID-edit` RoleBinding.
 - The portal form posts to `/onboarding/`; using `/` breaks behind the ingress rewrite and must not be changed back.
 - Future server/storage placement is controlled from `STORAGE_TYPES` in `k8s/onboarding-portal.yaml`. Add another entry there with a label, StorageClass, and node name when another worker/storage target is ready.
+
+## GPU Usage Dashboard
+
+The new cluster has the same Rancher-style GPU usage dashboard pattern as production:
+
+```text
+k8s/gpu-usage-dashboard.yaml
+```
+
+It creates:
+
+- Namespace `kube-utils`
+- Deployment/Service `k8s-gpu-usage`
+- ConfigMap `k8s-gpu-usage-custom-app`
+- RBAC for the dashboard ServiceAccount
+- Role/RoleBinding allowing authenticated users to open the `k8s-gpu-usage` service proxy
+- Rancher `NavLink` named `gpu-usage-dashboard`
+
+Rancher NavLink target:
+
+```text
+https://usg-demo-4.sb.dfki.de:32004/k8s/clusters/local/api/v1/namespaces/kube-utils/services/http:k8s-gpu-usage:80/proxy/
+```
+
+The dashboard uses the new cluster's GPU Operator host-driver layout and collects from `gpu-operator` pods labeled `app=nvidia-dcgm-exporter`.
